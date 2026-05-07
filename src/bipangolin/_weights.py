@@ -19,10 +19,10 @@ from urllib.request import urlretrieve
 # ---- USER-CONFIGURABLE CONSTANTS ----
 # These point at YOUR github release. Update before publishing.
 PANGOLIN_WEIGHTS_URL = (
-    "https://github.com/Delayed-Gitification/bipangolin/releases/download/v0.1.0/"
+    "https://github.com/USERNAME/bipangolin/releases/download/v0.1.0/"
     "pangolin_models_v2.tar.gz"
 )
-PANGOLIN_WEIGHTS_SHA256 = "93d40feb18d1ab7fa56ea856054b99e8d540565ceb292fcc1f78aae9d4b2fbf5"
+PANGOLIN_WEIGHTS_SHA256 = "REPLACE_WITH_ACTUAL_SHA256_BEFORE_PUBLISHING"
 # -------------------------------------
 
 
