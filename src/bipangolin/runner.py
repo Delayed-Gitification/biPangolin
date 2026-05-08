@@ -121,7 +121,9 @@ class BiPangolinRunner:
                  probe_dir: Optional[Union[str, Path]] = None,
                  device: Union[str, torch.device] = "auto",
                  ensemble: bool = True,
-                 tissue: str = "all_tissues"):
+                 tissue: str = "all_tissues",
+                 correction_k: Optional[float] = None,
+                 correction_file: Optional[Union[str, Path]] = None):
         self.pangolin_model_dir = Path(pangolin_model_dir) if pangolin_model_dir \
                                    else resolve_pangolin_weights()
         self.probe_dir = Path(probe_dir) if probe_dir \
@@ -154,6 +156,9 @@ class BiPangolinRunner:
         print(f"biPangolin: {len(self._pair_specs)} model+probe pairs "
               f"(tissue={tissue}) on {self.device}")
 
+        self.correction_k = None
+        self._load_correction(correction_file, correction_k)
+
     # -- setup ---------------------------------------------------------------
 
     @staticmethod
@@ -167,6 +172,27 @@ class BiPangolinRunner:
                 return torch.device("mps")
             return torch.device("cpu")
         return torch.device(device)
+
+    def _load_correction(self, correction_file, correction_k):
+        import json
+        if correction_file is None:
+            auto = self.probe_dir / "optimal_correction.json"
+            if auto.exists():
+                correction_file = auto
+        if correction_file is not None:
+            with open(correction_file) as f:
+                self.correction_k = float(json.load(f)["recommended_k"])
+            print(f"  correction k={self.correction_k:.1f} (from {Path(correction_file).name})")
+        elif correction_k is not None:
+            self.correction_k = float(correction_k)
+
+    def _apply_correction(self, probe_sum: torch.Tensor) -> torch.Tensor:
+        k = self.correction_k
+        if k is None or k == 1.0:
+            return probe_sum
+        scaled = probe_sum.clone()
+        scaled[NONE_CLASS] *= k
+        return scaled / scaled.sum(dim=0, keepdim=True).clamp_min(1e-12)
 
     def _discover_pairs(self, tissue: str, ensemble: bool):
         """Build list of (pangolin_path, probe_path, tissue_idx) tuples."""
@@ -494,6 +520,8 @@ class BiPangolinRunner:
                 p_sums[t]   = p_sums[t] / max(n_t, 1)
                 psi_sums[t] = psi_sums[t] / max(n_t, 1)
             probe_sum = probe_sum / len(self._pair_specs)
+
+        probe_sum = self._apply_correction(probe_sum)
 
         return BiPangolinResult(
             probe_none=probe_sum[NONE_CLASS],
