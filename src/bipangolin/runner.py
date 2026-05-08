@@ -13,7 +13,7 @@ Usage (in script):
 Usage (quick test in terminal):
     python runner.py /path/to/models /path/to/probes
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import re
@@ -27,6 +27,7 @@ from ._weights import resolve_pangolin_weights, resolve_probe_weights
 # Geometry constants
 PANGOLIN_CROP = 5000
 WINDOW_LEN_DEFAULT = 20000   
+WINDOW_LEN = WINDOW_LEN_DEFAULT
 USABLE_LEN = WINDOW_LEN_DEFAULT - 2 * PANGOLIN_CROP
 TILE_OVERLAP = 2000          
 
@@ -151,6 +152,7 @@ class BiPangolinResult:
     probe_acceptor: torch.Tensor
     probe_donor: torch.Tensor
     tissues: tuple
+    metadata: dict = field(default_factory=dict)
 
     def __len__(self):
         return self.probe_none.shape[0]
@@ -191,6 +193,8 @@ class BiPangolinRunner:
             Path(pangolin_model_dir) if pangolin_model_dir else resolve_pangolin_weights()
         )
         self.probe_dir = Path(probe_dir) if probe_dir else resolve_probe_weights()
+        self.tissue = tissue
+        self.ensemble = ensemble
         self._pair_specs = []
         self.correction_k = self._resolve_correction_k(correction_k, correction_file)
 
@@ -243,7 +247,13 @@ class BiPangolinRunner:
 
         with open(correction_path) as f:
             correction = json.load(f)
-        return float(correction["empirical_sweep"]["best_k"])
+        try:
+            return float(correction["empirical_sweep"]["best_k"])
+        except KeyError as e:
+            raise KeyError(
+                f"{correction_path} must contain empirical_sweep.best_k "
+                "for biPangolin's default correction."
+            ) from e
 
     def _apply_correction(self, probe_probs):
         if self.correction_k is None or self.correction_k == 1.0:
@@ -294,36 +304,182 @@ class BiPangolinRunner:
 
     @torch.no_grad()
     def score_sequence(self, seq):
-        padded = "N" * PANGOLIN_CROP + seq + "N" * PANGOLIN_CROP
-        seq_t = one_hot_encode(padded).unsqueeze(0).to(self.device)
         L_out = len(seq)
+        if L_out == 0:
+            raise ValueError("Sequence is empty")
+        if L_out > USABLE_LEN:
+            raise ValueError(
+                f"Sequence length {L_out} exceeds single-window max {USABLE_LEN}. "
+                "Use score_long_sequence() for longer inputs.")
 
-        prob_sums = {t: torch.zeros(L_out, device=self.device) for t in self.tissues_present}
-        psi_sums  = {t: torch.zeros(L_out, device=self.device) for t in self.tissues_present}
+        padded = "N" * PANGOLIN_CROP + seq + "N" * (WINDOW_LEN - PANGOLIN_CROP - L_out)
+        seq_t = one_hot_encode(padded).unsqueeze(0).to(self.device)
+
+        prob_sums = {t: torch.zeros(L_out) for t in self.tissues_present}
+        psi_sums  = {t: torch.zeros(L_out) for t in self.tissues_present}
         count     = {t: 0 for t in self.tissues_present}
-        probe_sum = torch.zeros(3, L_out, device=self.device)
-        n_pairs   = 0
+        probe_sum = torch.zeros(3, L_out)
 
         for pangolin_model, probe, handles, cfg, tissue_idx in self._iter_pairs():
             pangolin_out, probe_probs = self._forward_one(
                 pangolin_model, probe, handles, cfg, seq_t)
-            prob_sums[tissue_idx] += pangolin_out[PROB_CHANNEL_PER_TISSUE[tissue_idx]]
-            psi_sums[tissue_idx]  += pangolin_out[PSI_CHANNEL_PER_TISSUE[tissue_idx]]
+            prob_sums[tissue_idx] += pangolin_out[PROB_CHANNEL_PER_TISSUE[tissue_idx], :L_out].cpu()
+            psi_sums[tissue_idx]  += pangolin_out[PSI_CHANNEL_PER_TISSUE[tissue_idx], :L_out].cpu()
             count[tissue_idx] += 1
-            probe_sum += probe_probs
-            n_pairs += 1
+            probe_sum += probe_probs[:, :L_out].cpu()
 
-        prob_stack = torch.stack([prob_sums[t] / count[t] for t in self.tissues_present])
-        psi_stack  = torch.stack([psi_sums[t]  / count[t] for t in self.tissues_present])
-        probe_avg  = self._apply_correction(probe_sum / n_pairs)
+        return self._assemble_result(
+            prob_sums,
+            psi_sums,
+            probe_sum,
+            metadata={"length": L_out, "tiled": False},
+        )
+
+    @torch.no_grad()
+    def score_long_sequence(self, seq, overlap=TILE_OVERLAP):
+        L_out = len(seq)
+        if L_out == 0:
+            raise ValueError("Sequence is empty")
+        if L_out <= USABLE_LEN:
+            return self.score_sequence(seq)
+        if not (0 <= overlap < USABLE_LEN):
+            raise ValueError(f"overlap must be in [0, {USABLE_LEN}), got {overlap}")
+
+        stride = USABLE_LEN - overlap
+        starts = list(range(0, max(1, L_out - USABLE_LEN + 1), stride))
+        if starts[-1] + USABLE_LEN < L_out:
+            starts.append(L_out - USABLE_LEN)
+
+        blend = self._triangular_blend(USABLE_LEN, overlap)
+        padded = "N" * PANGOLIN_CROP + seq + "N" * PANGOLIN_CROP
+        padded_t = one_hot_encode(padded).to(self.device)
+
+        prob_sums = {t: torch.zeros(L_out) for t in self.tissues_present}
+        psi_sums = {t: torch.zeros(L_out) for t in self.tissues_present}
+        probe_sum = torch.zeros(3, L_out)
+        weight_sum = torch.zeros(L_out)
+        tissue_weight_sum = {t: torch.zeros(L_out) for t in self.tissues_present}
+
+        for pangolin_model, probe, handles, cfg, tissue_idx in self._iter_pairs():
+            for start in starts:
+                window = padded_t[:, start:start + WINDOW_LEN].unsqueeze(0)
+                pangolin_out, probe_probs = self._forward_one(
+                    pangolin_model, probe, handles, cfg, window)
+
+                lo = start
+                hi = min(start + USABLE_LEN, L_out)
+                n = hi - lo
+                w = blend[:n]
+
+                prob_sums[tissue_idx][lo:hi] += (
+                    pangolin_out[PROB_CHANNEL_PER_TISSUE[tissue_idx], :n].cpu() * w)
+                psi_sums[tissue_idx][lo:hi] += (
+                    pangolin_out[PSI_CHANNEL_PER_TISSUE[tissue_idx], :n].cpu() * w)
+                probe_sum[:, lo:hi] += probe_probs[:, :n].cpu() * w.unsqueeze(0)
+                tissue_weight_sum[tissue_idx][lo:hi] += w
+                weight_sum[lo:hi] += w
+
+        for tissue_idx in self.tissues_present:
+            weights = tissue_weight_sum[tissue_idx].clamp_min(1e-9)
+            prob_sums[tissue_idx] = prob_sums[tissue_idx] / weights
+            psi_sums[tissue_idx] = psi_sums[tissue_idx] / weights
+        probe_sum = probe_sum / weight_sum.clamp_min(1e-9).unsqueeze(0)
+
+        return self._assemble_result(
+            prob_sums,
+            psi_sums,
+            probe_sum,
+            metadata={
+                "length": L_out,
+                "tiled": True,
+                "n_windows": len(starts),
+                "overlap": overlap,
+            },
+            skip_pair_normalisation=True,
+        )
+
+    @torch.no_grad()
+    def score_region(self, fasta_path, chrom, start, end, **kwargs):
+        try:
+            import pyfastx
+        except ImportError as e:
+            raise ImportError("score_region requires pyfastx: pip install pyfastx") from e
+
+        fasta = pyfastx.Fasta(str(fasta_path))
+        if chrom not in fasta:
+            raise KeyError(f"Chromosome {chrom!r} not in FASTA")
+
+        start, end = int(start), int(end)
+        if not (0 <= start < end <= len(fasta[chrom])):
+            raise ValueError(f"Bad coords [{start}, {end}) for {chrom} "
+                             f"(length {len(fasta[chrom])})")
+
+        seq = fasta[chrom][start:end].seq
+        result = score_sequence_or_long_sequence(self, seq) if not kwargs else (
+            self.score_sequence(seq) if len(seq) <= USABLE_LEN
+            else self.score_long_sequence(seq, **kwargs)
+        )
+        result.metadata.update({
+            "chrom": chrom,
+            "start": start,
+            "end": end,
+            "fasta": str(fasta_path),
+        })
+        return result
+
+    def score_variant(self, fasta_path, chrom, pos, ref, alt, distance=50):
+        try:
+            import pyfastx
+        except ImportError as e:
+            raise ImportError("score_variant requires pyfastx: pip install pyfastx") from e
+
+        from ._variants import score_variant as _score_variant
+        fasta = pyfastx.Fasta(str(fasta_path))
+        return _score_variant(self, fasta, chrom, pos, ref, alt, distance=distance)
+
+    def score_vcf(self, vcf_in, vcf_out, fasta_path, distance=50,
+                  tissue_for_info=None, progress=True):
+        from ._variants import score_vcf as _score_vcf
+        return _score_vcf(
+            self,
+            vcf_in,
+            vcf_out,
+            fasta_path,
+            distance=distance,
+            tissue_for_info=tissue_for_info,
+            progress=progress,
+        )
+
+    @staticmethod
+    def _triangular_blend(usable_len, overlap):
+        if overlap == 0:
+            return torch.ones(usable_len)
+        ramp = torch.linspace(0, 1, overlap + 2)[1:-1]
+        weights = torch.ones(usable_len)
+        weights[:overlap] = ramp
+        weights[-overlap:] = ramp.flip(0)
+        return weights
+
+    def _assemble_result(self, prob_sums, psi_sums, probe_sum, metadata=None,
+                         skip_pair_normalisation=False):
+        if not skip_pair_normalisation:
+            pair_tissues = [t for _, _, t in self._pair_specs]
+            for tissue_idx in self.tissues_present:
+                n_tissue = pair_tissues.count(tissue_idx)
+                prob_sums[tissue_idx] = prob_sums[tissue_idx] / max(n_tissue, 1)
+                psi_sums[tissue_idx] = psi_sums[tissue_idx] / max(n_tissue, 1)
+            probe_sum = probe_sum / len(self._pair_specs)
+
+        probe_sum = self._apply_correction(probe_sum)
 
         return BiPangolinResult(
-            pangolin_prob=prob_stack.cpu(),
-            pangolin_psi=psi_stack.cpu(),
-            probe_none=probe_avg[NONE_CLASS].cpu(),
-            probe_acceptor=probe_avg[ACC_CLASS].cpu(),
-            probe_donor=probe_avg[DON_CLASS].cpu(),
+            pangolin_prob=torch.stack([prob_sums[t] for t in self.tissues_present]),
+            pangolin_psi=torch.stack([psi_sums[t] for t in self.tissues_present]),
+            probe_none=probe_sum[NONE_CLASS],
+            probe_acceptor=probe_sum[ACC_CLASS],
+            probe_donor=probe_sum[DON_CLASS],
             tissues=self.tissue_names,
+            metadata=metadata or {},
         )
 
 
@@ -354,6 +510,7 @@ def selftest(pangolin_model_dir=None, probe_dir=None, device="auto",
           f"(P={result.probe_donor[don_argmax]:.3f}, P@69={result.probe_donor[69]:.3f})")
     print(f"  Annotated acceptor: 163  probe argmax: {acc_argmax}  "
           f"(P={result.probe_acceptor[acc_argmax]:.3f}, P@163={result.probe_acceptor[163]:.3f})")
+    return result
 
 
 def score_sequence_or_long_sequence(runner, seq):
