@@ -167,6 +167,40 @@ class BiPangolinResult:
             self.probe_donor.unsqueeze(0),
         ], dim=0)
 
+    def four_track_per_tissue(self):
+        """Return a 4 x n_tissues x L tissue-specific donor/acceptor matrix.
+
+        Channel order is:
+            0: donor PSI
+            1: donor P(spliced)
+            2: acceptor PSI
+            3: acceptor P(spliced)
+
+        Pangolin values are routed into donor or acceptor channels using the
+        probe's three-way argmax. Positions classified as None remain zero.
+        """
+        labels = torch.stack([
+            self.probe_none,
+            self.probe_acceptor,
+            self.probe_donor,
+        ], dim=0).argmax(dim=0)
+
+        out = torch.zeros(
+            4,
+            self.pangolin_prob.shape[0],
+            self.pangolin_prob.shape[1],
+            dtype=self.pangolin_prob.dtype,
+            device=self.pangolin_prob.device,
+        )
+        donor_mask = labels == DON_CLASS
+        acceptor_mask = labels == ACC_CLASS
+
+        out[0, :, donor_mask] = self.pangolin_psi[:, donor_mask]
+        out[1, :, donor_mask] = self.pangolin_prob[:, donor_mask]
+        out[2, :, acceptor_mask] = self.pangolin_psi[:, acceptor_mask]
+        out[3, :, acceptor_mask] = self.pangolin_prob[:, acceptor_mask]
+        return out
+
 
 # ---------------------------------------------------------------------------
 # Runner

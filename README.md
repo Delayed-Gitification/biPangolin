@@ -103,3 +103,27 @@ result.tissues         # names of tissue rows
 
 Probe probabilities use the empirical correction from `optimal_correction.json`
 by default.
+
+For a tissue-specific 4-track matrix:
+
+```python
+matrix = result.four_track_per_tissue()
+print(matrix.shape)  # (4, n_tissues, L)
+```
+
+The channel order is:
+
+```text
+0: donor PSI
+1: donor P(spliced)
+2: acceptor PSI
+3: acceptor P(spliced)
+```
+
+At each position, Pangolin values are routed into donor or acceptor channels
+using the biPangolin probe argmax. Positions classified as `None` remain zero.
+The same matrix can be written from the command line:
+
+```bash
+bipangolin score-seq sequence.fa --four-track-per-tissue-out prediction_matrix.npy
+```

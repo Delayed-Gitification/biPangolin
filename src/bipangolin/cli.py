@@ -5,6 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from .runner import (
@@ -37,6 +38,13 @@ def _write_bedgraph(result: BiPangolinResult, prefix: str, chrom: str = "seq",
         print(f"wrote {path}", file=sys.stderr)
 
 
+def _write_four_track_per_tissue_matrix(result: BiPangolinResult, path: str) -> None:
+    """Write 4 x n_tissues x L matrix as .npy."""
+    matrix = result.four_track_per_tissue().detach().cpu().numpy()
+    np.save(path, matrix)
+    print(f"wrote {path} shape={matrix.shape}", file=sys.stderr)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="bipangolin",
@@ -59,6 +67,8 @@ def main(argv=None):
                        choices=("all_tissues",) + TISSUE_NAMES)
     p_seq.add_argument("--out", default=None,
                        help="Prefix for bedGraph output (writes .donor.bg/.acceptor.bg/.none.bg)")
+    p_seq.add_argument("--four-track-per-tissue-out", default=None,
+                       help="Write 4 x n_tissues x L donor/acceptor-routed Pangolin matrix as .npy")
     p_seq.add_argument("--top", type=int, default=10, help="Top-K to print")
 
     # bipangolin score-region
@@ -73,6 +83,8 @@ def main(argv=None):
                        choices=("all_tissues",) + TISSUE_NAMES)
     p_reg.add_argument("--out", default=None,
                        help="Prefix for bedGraph output")
+    p_reg.add_argument("--four-track-per-tissue-out", default=None,
+                       help="Write 4 x n_tissues x L donor/acceptor-routed Pangolin matrix as .npy")
     p_reg.add_argument("--top", type=int, default=10)
 
     # bipangolin score-vcf
@@ -121,12 +133,16 @@ def main(argv=None):
         _print_summary(result, top_k=args.top)
         if args.out:
             _write_bedgraph(result, args.out, chrom=chrom, start=0)
+        if args.four_track_per_tissue_out:
+            _write_four_track_per_tissue_matrix(result, args.four_track_per_tissue_out)
 
     elif args.cmd == "score-region":
         result = runner.score_region(args.fasta, args.chrom, args.start, args.end)
         _print_summary(result, top_k=args.top)
         if args.out:
             _write_bedgraph(result, args.out, chrom=args.chrom, start=args.start)
+        if args.four_track_per_tissue_out:
+            _write_four_track_per_tissue_matrix(result, args.four_track_per_tissue_out)
 
     elif args.cmd == "score-vcf":
         n = runner.score_vcf(
