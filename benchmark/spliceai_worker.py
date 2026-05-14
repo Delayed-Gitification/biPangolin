@@ -24,7 +24,25 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 import numpy as np
 import spliceai
 from tensorflow.keras.models import load_model
-from spliceai.utils import one_hot_encode
+
+
+# SpliceAI's own one_hot_encode uses np.fromstring which was removed in
+# numpy 2.x. Re-implement using the same N/A/C/G/T -> rows mapping it expects.
+_BASE_TO_IDX = {"N": 0, "A": 1, "C": 2, "G": 3, "T": 4}
+_ONEHOT_MAP = np.asarray([
+    [0, 0, 0, 0],   # N
+    [1, 0, 0, 0],   # A
+    [0, 1, 0, 0],   # C
+    [0, 0, 1, 0],   # G
+    [0, 0, 0, 1],   # T
+], dtype=np.int8)
+
+
+def one_hot_encode(seq):
+    seq = seq.upper()
+    idx = np.fromiter((_BASE_TO_IDX.get(b, 0) for b in seq),
+                      dtype=np.int8, count=len(seq))
+    return _ONEHOT_MAP[idx]
 
 
 def main():
