@@ -48,6 +48,11 @@ def _log(msg):
     sys.stdout.flush()
 
 
+# numpy 2.x renamed np.trapz -> np.trapezoid (and removed the alias in newer
+# builds). Keep both interpreters happy.
+_trapz = getattr(np, "trapezoid", None) or np.trapz
+
+
 NONE_CLASS, ACC_CLASS, DON_CLASS = 0, 1, 2
 
 
@@ -94,7 +99,7 @@ def metric_bundle(score, y, drop_nan=True):
     recall = tp / n_pos
     denom = (tp + fp).astype(np.float64)
     precision = tp / np.maximum(denom, 1.0)
-    pr = float(np.trapz(
+    pr = float(_trapz(
         np.concatenate([[1.0], precision]),
         np.concatenate([[0.0], recall]),
     ))
@@ -103,7 +108,7 @@ def metric_bundle(score, y, drop_nan=True):
     n_neg = n_total - n_pos
     tpr = recall                                  # already tp / n_pos
     fpr = fp / n_neg
-    roc = float(np.trapz(
+    roc = float(_trapz(
         np.concatenate([[0.0], tpr]),
         np.concatenate([[0.0], fpr]),
     ))
