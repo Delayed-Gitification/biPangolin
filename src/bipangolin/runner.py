@@ -153,6 +153,11 @@ class BiPangolinResult:
     probe_donor: torch.Tensor
     tissues: tuple
     metadata: dict = field(default_factory=dict)
+    # Optional, only populated when runner was constructed with
+    # `per_tissue_probes=True`. Shape (3, n_tissues, L) — channel order
+    # NONE / ACC / DON, tissue order matches `tissues`. Each per-tissue
+    # probe is averaged across the 3 folds for that tissue only.
+    probe_per_tissue: "torch.Tensor | None" = None
 
     def __len__(self):
         return self.probe_none.shape[0]
@@ -221,7 +226,8 @@ def _resolve_device(device):
 class BiPangolinRunner:
     def __init__(self, pangolin_model_dir=None, probe_dir=None, device="auto",
                  ensemble=True, probe_tag=None, correction_k=None,
-                 correction_file=None, tissue="all_tissues"):
+                 correction_file=None, tissue="all_tissues",
+                 per_tissue_probes=False):
         self.device = _resolve_device(device)
         self.pangolin_model_dir = (
             Path(pangolin_model_dir) if pangolin_model_dir else resolve_pangolin_weights()
@@ -229,6 +235,7 @@ class BiPangolinRunner:
         self.probe_dir = Path(probe_dir) if probe_dir else resolve_probe_weights()
         self.tissue = tissue
         self.ensemble = ensemble
+        self.per_tissue_probes = per_tissue_probes
         self._pair_specs = []
         self.correction_k = self._resolve_correction_k(correction_k, correction_file)
 
@@ -353,6 +360,10 @@ class BiPangolinRunner:
         psi_sums  = {t: torch.zeros(L_out) for t in self.tissues_present}
         count     = {t: 0 for t in self.tissues_present}
         probe_sum = torch.zeros(3, L_out)
+        probe_sums_per_tissue = (
+            {t: torch.zeros(3, L_out) for t in self.tissues_present}
+            if self.per_tissue_probes else None
+        )
 
         for pangolin_model, probe, handles, cfg, tissue_idx in self._iter_pairs():
             pangolin_out, probe_probs = self._forward_one(
@@ -360,13 +371,17 @@ class BiPangolinRunner:
             prob_sums[tissue_idx] += pangolin_out[PROB_CHANNEL_PER_TISSUE[tissue_idx], :L_out].cpu()
             psi_sums[tissue_idx]  += pangolin_out[PSI_CHANNEL_PER_TISSUE[tissue_idx], :L_out].cpu()
             count[tissue_idx] += 1
-            probe_sum += probe_probs[:, :L_out].cpu()
+            p = probe_probs[:, :L_out].cpu()
+            probe_sum += p
+            if probe_sums_per_tissue is not None:
+                probe_sums_per_tissue[tissue_idx] += p
 
         return self._assemble_result(
             prob_sums,
             psi_sums,
             probe_sum,
             metadata={"length": L_out, "tiled": False},
+            probe_sums_per_tissue=probe_sums_per_tissue,
         )
 
     @torch.no_grad()
@@ -393,6 +408,10 @@ class BiPangolinRunner:
         probe_sum = torch.zeros(3, L_out)
         weight_sum = torch.zeros(L_out)
         tissue_weight_sum = {t: torch.zeros(L_out) for t in self.tissues_present}
+        probe_sums_per_tissue = (
+            {t: torch.zeros(3, L_out) for t in self.tissues_present}
+            if self.per_tissue_probes else None
+        )
 
         for pangolin_model, probe, handles, cfg, tissue_idx in self._iter_pairs():
             for start in starts:
@@ -409,7 +428,10 @@ class BiPangolinRunner:
                     pangolin_out[PROB_CHANNEL_PER_TISSUE[tissue_idx], :n].cpu() * w)
                 psi_sums[tissue_idx][lo:hi] += (
                     pangolin_out[PSI_CHANNEL_PER_TISSUE[tissue_idx], :n].cpu() * w)
-                probe_sum[:, lo:hi] += probe_probs[:, :n].cpu() * w.unsqueeze(0)
+                p_w = probe_probs[:, :n].cpu() * w.unsqueeze(0)
+                probe_sum[:, lo:hi] += p_w
+                if probe_sums_per_tissue is not None:
+                    probe_sums_per_tissue[tissue_idx][:, lo:hi] += p_w
                 tissue_weight_sum[tissue_idx][lo:hi] += w
                 weight_sum[lo:hi] += w
 
@@ -417,6 +439,9 @@ class BiPangolinRunner:
             weights = tissue_weight_sum[tissue_idx].clamp_min(1e-9)
             prob_sums[tissue_idx] = prob_sums[tissue_idx] / weights
             psi_sums[tissue_idx] = psi_sums[tissue_idx] / weights
+            if probe_sums_per_tissue is not None:
+                probe_sums_per_tissue[tissue_idx] = (
+                    probe_sums_per_tissue[tissue_idx] / weights.unsqueeze(0))
         probe_sum = probe_sum / weight_sum.clamp_min(1e-9).unsqueeze(0)
 
         return self._assemble_result(
@@ -430,6 +455,7 @@ class BiPangolinRunner:
                 "overlap": overlap,
             },
             skip_pair_normalisation=True,
+            probe_sums_per_tissue=probe_sums_per_tissue,
         )
 
     @torch.no_grad()
@@ -495,16 +521,27 @@ class BiPangolinRunner:
         return weights
 
     def _assemble_result(self, prob_sums, psi_sums, probe_sum, metadata=None,
-                         skip_pair_normalisation=False):
+                         skip_pair_normalisation=False,
+                         probe_sums_per_tissue=None):
         if not skip_pair_normalisation:
             pair_tissues = [t for _, _, t in self._pair_specs]
             for tissue_idx in self.tissues_present:
                 n_tissue = pair_tissues.count(tissue_idx)
                 prob_sums[tissue_idx] = prob_sums[tissue_idx] / max(n_tissue, 1)
                 psi_sums[tissue_idx] = psi_sums[tissue_idx] / max(n_tissue, 1)
+                if probe_sums_per_tissue is not None:
+                    probe_sums_per_tissue[tissue_idx] = (
+                        probe_sums_per_tissue[tissue_idx] / max(n_tissue, 1))
             probe_sum = probe_sum / len(self._pair_specs)
 
         probe_sum = self._apply_correction(probe_sum)
+
+        probe_per_tissue = None
+        if probe_sums_per_tissue is not None:
+            # (3, n_tissues, L), correction applied per-tissue.
+            corrected = [self._apply_correction(probe_sums_per_tissue[t])
+                         for t in self.tissues_present]
+            probe_per_tissue = torch.stack(corrected, dim=1)
 
         return BiPangolinResult(
             pangolin_prob=torch.stack([prob_sums[t] for t in self.tissues_present]),
@@ -514,6 +551,7 @@ class BiPangolinRunner:
             probe_donor=probe_sum[DON_CLASS],
             tissues=self.tissue_names,
             metadata=metadata or {},
+            probe_per_tissue=probe_per_tissue,
         )
 
 

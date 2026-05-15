@@ -266,7 +266,9 @@ def score_gene(runner, fasta, chrom, gene_id, site_set, chrom_sites,
     if L == 0:
         return None
 
-    # biPangolin (raw, ensembled across all 12 model+probe pairs)
+    # biPangolin (raw, ensembled across all 12 model+probe pairs;
+    # optionally also per-tissue probe outputs if runner was constructed with
+    # per_tissue_probes=True)
     try:
         from bipangolin.runner import score_sequence_or_long_sequence
         result = score_sequence_or_long_sequence(runner, seq)
@@ -280,6 +282,11 @@ def score_gene(runner, fasta, chrom, gene_id, site_set, chrom_sites,
     pangolin_p = result.pangolin_prob.detach().cpu().numpy()    # (T, L)
     pangolin_psi = result.pangolin_psi.detach().cpu().numpy()   # (T, L)
     tissues = list(result.tissues)
+    # Per-tissue probe outputs, shape (3, n_tissues, L) or None.
+    probe_per_tissue = (
+        result.probe_per_tissue.detach().cpu().numpy()
+        if result.probe_per_tissue is not None else None
+    )
 
     # SpliceAI (per-position acceptor / donor; may be shorter than L)
     if spliceai_worker is not None:
@@ -328,10 +335,16 @@ def score_gene(runner, fasta, chrom, gene_id, site_set, chrom_sites,
     for i, t in enumerate(tissues):
         out[f"pangolin_p_{t}"] = pangolin_p[i].astype(np.float16)
         out[f"pangolin_psi_{t}"] = pangolin_psi[i].astype(np.float16)
+    if probe_per_tissue is not None:
+        # probe_per_tissue: (3, n_tissues, L) — channel order none/acc/don
+        for i, t in enumerate(tissues):
+            out[f"probe_none_{t}"] = probe_per_tissue[0, i].astype(np.float16)
+            out[f"probe_acc_{t}"] = probe_per_tissue[1, i].astype(np.float16)
+            out[f"probe_don_{t}"] = probe_per_tissue[2, i].astype(np.float16)
     return out
 
 
-def _arrow_schema(tissues):
+def _arrow_schema(tissues, per_tissue_probes=False):
     fields = [
         ("chrom", pa.string()),
         ("gene_id", pa.string()),
@@ -348,6 +361,11 @@ def _arrow_schema(tissues):
         ("spliceai_acc", pa.float16()),
         ("spliceai_don", pa.float16()),
     ]
+    if per_tissue_probes:
+        for t in tissues:
+            fields.append((f"probe_none_{t}", pa.float16()))
+            fields.append((f"probe_acc_{t}", pa.float16()))
+            fields.append((f"probe_don_{t}", pa.float16()))
     return pa.schema(fields)
 
 
@@ -405,6 +423,10 @@ def main():
     ap.add_argument("--spliceai-context", type=int, default=10000)
     ap.add_argument("--limit", type=int, default=None,
                     help="Score at most N genes per chrom (smoke test).")
+    ap.add_argument("--per-tissue-probes", action="store_true",
+                    help="Also store per-tissue probe outputs (averaged across "
+                         "the 3 folds for each tissue), in addition to the "
+                         "global ensemble probe. Adds 12 columns to the parquet.")
     args = ap.parse_args()
 
     # Resolve device
@@ -420,13 +442,15 @@ def main():
     print(f"device: {device}")
 
     # Load biPangolin once
-    print("loading biPangolin (all_tissues, correction_k=1.0)...")
+    print(f"loading biPangolin (all_tissues, correction_k=1.0, "
+          f"per_tissue_probes={args.per_tissue_probes})...")
     runner = BiPangolinRunner(
         pangolin_model_dir=args.pangolin_model_dir,
         probe_dir=args.probe_dir,
         device=device,
         tissue="all_tissues",
         correction_k=1.0,
+        per_tissue_probes=args.per_tissue_probes,
     )
 
     print(f"parsing GTF for {args.chroms}...")
@@ -434,7 +458,7 @@ def main():
 
     fasta = pyfastx.Fasta(args.fasta)
 
-    schema = _arrow_schema(list(TISSUE_NAMES))
+    schema = _arrow_schema(list(TISSUE_NAMES), per_tissue_probes=args.per_tissue_probes)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
