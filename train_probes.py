@@ -46,7 +46,7 @@ DEFAULT_OVERLAP = 2000
 GENE_FLANK = 5000
 
 K_MAX_RADIUS = 2
-K_MAX = 2 * K_MAX_RADIUS + 1    # = 5
+K_MAX = 2 * K_MAX_RADIUS + 1   
 
 # Class encoding
 NONE_CLASS, ACC_CLASS, DON_CLASS = 0, 1, 2
@@ -767,7 +767,7 @@ if __name__ == "__main__":
         max_genes_val=None,
         max_genes_test=None,
         probe_layer=PROBE_LAYERS,
-        include_sequence=True,   # also concatenate raw 11-nt one-hot window
+        include_sequence=True,
         kernel_size=1,
         hidden_dim=64,
     )
