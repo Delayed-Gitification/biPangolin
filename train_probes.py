@@ -781,7 +781,7 @@ if __name__ == "__main__":
         out_dir=out_dir,
         cache_dir=cache_dir,
         batch_size=32,
-        none_subsample_ratio=100,
+        none_subsample_ratio=30,
         max_genes_train=None,
         max_genes_val=None,
         max_genes_test=None,
