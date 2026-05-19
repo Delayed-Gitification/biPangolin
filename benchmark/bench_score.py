@@ -19,7 +19,7 @@ Schema (float16 except where noted):
     probe_acc     f16
     probe_don     f16
     pangolin_p_{tissue}   f16    × 4 tissues
-    pangolin_psi_{tissue} f16    × 4 tissues
+    pangolin_psi_{tissue} f16    × 4 tissues   (only if --use-psi-models)
     spliceai_acc  f16
     spliceai_don  f16
 
@@ -280,7 +280,12 @@ def score_gene(runner, fasta, chrom, gene_id, site_set, chrom_sites,
     probe_acc = result.probe_acceptor.detach().cpu().numpy()
     probe_don = result.probe_donor.detach().cpu().numpy()
     pangolin_p = result.pangolin_prob.detach().cpu().numpy()    # (T, L)
-    pangolin_psi = result.pangolin_psi.detach().cpu().numpy()   # (T, L)
+    # pangolin_psi is None unless the runner was constructed with
+    # use_psi_models=True (which loads the PSI-tuned weight files).
+    pangolin_psi = (
+        result.pangolin_psi.detach().cpu().numpy()
+        if result.pangolin_psi is not None else None
+    )
     tissues = list(result.tissues)
     # Per-tissue probe outputs, shape (3, n_tissues, L) or None.
     probe_per_tissue = (
@@ -334,7 +339,8 @@ def score_gene(runner, fasta, chrom, gene_id, site_set, chrom_sites,
     }
     for i, t in enumerate(tissues):
         out[f"pangolin_p_{t}"] = pangolin_p[i].astype(np.float16)
-        out[f"pangolin_psi_{t}"] = pangolin_psi[i].astype(np.float16)
+        if pangolin_psi is not None:
+            out[f"pangolin_psi_{t}"] = pangolin_psi[i].astype(np.float16)
     if probe_per_tissue is not None:
         # probe_per_tissue: (3, n_tissues, L) — channel order none/acc/don
         for i, t in enumerate(tissues):
@@ -344,7 +350,7 @@ def score_gene(runner, fasta, chrom, gene_id, site_set, chrom_sites,
     return out
 
 
-def _arrow_schema(tissues, per_tissue_probes=False):
+def _arrow_schema(tissues, per_tissue_probes=False, include_psi=True):
     fields = [
         ("chrom", pa.string()),
         ("gene_id", pa.string()),
@@ -356,7 +362,8 @@ def _arrow_schema(tissues, per_tissue_probes=False):
     ]
     for t in tissues:
         fields.append((f"pangolin_p_{t}", pa.float16()))
-        fields.append((f"pangolin_psi_{t}", pa.float16()))
+        if include_psi:
+            fields.append((f"pangolin_psi_{t}", pa.float16()))
     fields += [
         ("spliceai_acc", pa.float16()),
         ("spliceai_don", pa.float16()),
@@ -427,6 +434,12 @@ def main():
                     help="Also store per-tissue probe outputs (averaged across "
                          "the 3 folds for each tissue), in addition to the "
                          "global ensemble probe. Adds 12 columns to the parquet.")
+    ap.add_argument("--use-psi-models", action="store_true",
+                    help="Load Pangolin's PSI-tuned weight files (final.*.[1357].3.v2) "
+                         "and read PSI from those. Without this flag, pangolin_psi_* "
+                         "columns are NOT written, because reading PSI from P-tuned "
+                         "models gives a misleading side-output. Costs ~2x Pangolin "
+                         "inference time.")
     args = ap.parse_args()
 
     # Resolve device
@@ -443,7 +456,8 @@ def main():
 
     # Load biPangolin once
     print(f"loading biPangolin (all_tissues, correction_k=1.0, "
-          f"per_tissue_probes={args.per_tissue_probes})...")
+          f"per_tissue_probes={args.per_tissue_probes}, "
+          f"use_psi_models={args.use_psi_models})...")
     runner = BiPangolinRunner(
         pangolin_model_dir=args.pangolin_model_dir,
         probe_dir=args.probe_dir,
@@ -451,6 +465,7 @@ def main():
         tissue="all_tissues",
         correction_k=1.0,
         per_tissue_probes=args.per_tissue_probes,
+        use_psi_models=args.use_psi_models,
     )
 
     print(f"parsing GTF for {args.chroms}...")
@@ -458,7 +473,9 @@ def main():
 
     fasta = pyfastx.Fasta(args.fasta)
 
-    schema = _arrow_schema(list(TISSUE_NAMES), per_tissue_probes=args.per_tissue_probes)
+    schema = _arrow_schema(list(TISSUE_NAMES),
+                           per_tissue_probes=args.per_tissue_probes,
+                           include_psi=args.use_psi_models)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 

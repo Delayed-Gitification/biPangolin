@@ -36,7 +36,16 @@ PROB_CHANNEL_PER_TISSUE = [1, 4, 7, 10]   # P(spliced)
 PSI_CHANNEL_PER_TISSUE  = [2, 5, 8, 11]   # PSI / usage
 TISSUE_NAMES = ("heart", "liver", "brain", "testis")
 
-PANGOLIN_FILE_RE = re.compile(r"^final\.([1-3])\.([0246])\.3\.v2$")
+# The Pangolin v2 weight files come in two flavours, fine-tuned for different
+# output heads of the same multi-output architecture:
+#   final.{1-3}.{0,2,4,6}.3.v2  →  P(spliced) heads — channels [1,4,7,10]
+#   final.{1-3}.{1,3,5,7}.3.v2  →  usage/PSI heads — channels [2,5,8,11]
+# Reading the "wrong" channel from a model gives a side-output the trunk wasn't
+# tuned for, which is what Pangolin's own CLI silently does to nobody's benefit
+# (it then ignores PSI entirely and reports only variant-induced ΔP).
+# See discussion in Zeng & Li 2022 §"Training Pangolin".
+PANGOLIN_FILE_RE     = re.compile(r"^final\.([1-3])\.([0246])\.3\.v2$")
+PANGOLIN_PSI_FILE_RE = re.compile(r"^final\.([1-3])\.([1357])\.3\.v2$")
 DEFAULT_CORRECTION_FILE = Path(__file__).parent / "data" / "probes" / "optimal_correction.json"
 
 # Class encoding
@@ -147,11 +156,17 @@ def attach_hooks(model, probe_layers):
 @dataclass
 class BiPangolinResult:
     pangolin_prob: torch.Tensor
-    pangolin_psi: torch.Tensor
     probe_none: torch.Tensor
     probe_acceptor: torch.Tensor
     probe_donor: torch.Tensor
     tissues: tuple
+    # Pangolin tissue-specific PSI/usage predictions, shape (n_tissues, L).
+    # ONLY populated when the runner was constructed with `use_psi_models=True`,
+    # which loads the PSI-tuned weight files separately. Reading the PSI
+    # channel from a P-tuned model gives a misleading side-output that
+    # correlates with P rather than with true PSI, so we refuse to do that
+    # silently — `None` here means "we don't know, ask explicitly".
+    pangolin_psi: "torch.Tensor | None" = None
     metadata: dict = field(default_factory=dict)
     # Optional, only populated when runner was constructed with
     # `per_tissue_probes=True`. Shape (3, n_tissues, L) — channel order
@@ -164,13 +179,15 @@ class BiPangolinResult:
 
     @property
     def raw(self):
-        return torch.cat([
-            self.pangolin_prob,
-            self.pangolin_psi,
+        parts = [self.pangolin_prob]
+        if self.pangolin_psi is not None:
+            parts.append(self.pangolin_psi)
+        parts += [
             self.probe_none.unsqueeze(0),
             self.probe_acceptor.unsqueeze(0),
             self.probe_donor.unsqueeze(0),
-        ], dim=0)
+        ]
+        return torch.cat(parts, dim=0)
 
     def four_track_per_tissue(self):
         """Return a 4 x n_tissues x L tissue-specific donor/acceptor matrix.
@@ -197,6 +214,12 @@ class BiPangolinResult:
             dtype=self.pangolin_prob.dtype,
             device=self.pangolin_prob.device,
         )
+        if self.pangolin_psi is None:
+            raise RuntimeError(
+                "four_track_per_tissue() needs pangolin_psi but it is None. "
+                "Re-run with BiPangolinRunner(use_psi_models=True) to load the "
+                "PSI-tuned weight files."
+            )
         donor_mask = labels == DON_CLASS
         acceptor_mask = labels == ACC_CLASS
 
@@ -227,7 +250,16 @@ class BiPangolinRunner:
     def __init__(self, pangolin_model_dir=None, probe_dir=None, device="auto",
                  ensemble=True, probe_tag=None, correction_k=None,
                  correction_file=None, tissue="all_tissues",
-                 per_tissue_probes=False):
+                 per_tissue_probes=False, use_psi_models=False):
+        """Load Pangolin + probes for inference.
+
+        use_psi_models: if True, additionally load Pangolin's PSI-tuned weight
+            files (final.{fold}.{1,3,5,7}.3.v2) and read PSI from those.
+            If False (default), pangolin_psi is left None on the result —
+            because reading the PSI channel from a P-tuned model gives a
+            misleading side-output that correlates with P, not real PSI.
+            Costs ~2× Pangolin inference compute.
+        """
         self.device = _resolve_device(device)
         self.pangolin_model_dir = (
             Path(pangolin_model_dir) if pangolin_model_dir else resolve_pangolin_weights()
@@ -236,7 +268,9 @@ class BiPangolinRunner:
         self.tissue = tissue
         self.ensemble = ensemble
         self.per_tissue_probes = per_tissue_probes
+        self.use_psi_models = use_psi_models
         self._pair_specs = []
+        self._psi_specs = []   # (pangolin_path, tissue_idx) — no probes; PSI-tuned models
         self.correction_k = self._resolve_correction_k(correction_k, correction_file)
 
         valid_tissues = ("all_tissues",) + TISSUE_NAMES
@@ -244,19 +278,24 @@ class BiPangolinRunner:
             raise ValueError(f"tissue must be one of {valid_tissues}, got {tissue!r}")
 
         candidates = []
+        psi_candidates = []
         for p in sorted(self.pangolin_model_dir.glob("final.*.v2")):
-            m = PANGOLIN_FILE_RE.match(p.name)
-            if not m:
-                continue
-            tissue_idx = int(m.group(2)) // 2
-            if tissue != "all_tissues" and TISSUE_NAMES[tissue_idx] != tissue:
-                continue
-            candidates.append((p, tissue_idx))
+            m_p = PANGOLIN_FILE_RE.match(p.name)
+            m_psi = PANGOLIN_PSI_FILE_RE.match(p.name)
+            if m_p:
+                tissue_idx = int(m_p.group(2)) // 2
+                if tissue == "all_tissues" or TISSUE_NAMES[tissue_idx] == tissue:
+                    candidates.append((p, tissue_idx))
+            elif m_psi and use_psi_models:
+                tissue_idx = (int(m_psi.group(2)) - 1) // 2
+                if tissue == "all_tissues" or TISSUE_NAMES[tissue_idx] == tissue:
+                    psi_candidates.append((p, tissue_idx))
 
         if not candidates:
-            raise FileNotFoundError(f"No Pangolin models found in {self.pangolin_model_dir}")
+            raise FileNotFoundError(f"No Pangolin P-tuned models found in {self.pangolin_model_dir}")
         if not ensemble:
             candidates = candidates[:1]
+            psi_candidates = psi_candidates[:1]
 
         for pangolin_path, tissue_idx in candidates:
             pattern = f"probe.{pangolin_path.name}.*.pt"
@@ -267,9 +306,19 @@ class BiPangolinRunner:
                 raise FileNotFoundError(f"No probe matched for {pangolin_path.name} in {self.probe_dir}")
             self._pair_specs.append((pangolin_path, probe_paths[-1], tissue_idx)) # Load latest match
 
+        if use_psi_models:
+            if not psi_candidates:
+                raise FileNotFoundError(
+                    f"use_psi_models=True but no PSI-tuned Pangolin models "
+                    f"(final.*.[1357].3.v2) found in {self.pangolin_model_dir}"
+                )
+            self._psi_specs = psi_candidates
+
         self.tissues_present = sorted({t for _, _, t in self._pair_specs})
         self.tissue_names = tuple(TISSUE_NAMES[t] for t in self.tissues_present)
         print(f"biPangolin: {len(self._pair_specs)} model+probe pairs ready on {self.device}")
+        if use_psi_models:
+            print(f"biPangolin: + {len(self._psi_specs)} PSI-tuned models for PSI predictions")
         if self.correction_k is not None and self.correction_k != 1.0:
             print(f"biPangolin: correction k={self.correction_k:.1f}")
 
@@ -308,14 +357,26 @@ class BiPangolinRunner:
         for pangolin_path, probe_path, tissue_idx in self._pair_specs:
             pangolin_model = load_frozen_pangolin(pangolin_path, self.device)
             probe, cfg = load_probe(probe_path, self.device)
-            
+
             layers = parse_probe_layers(cfg["probe_layer"])
             handles = attach_hooks(pangolin_model, layers)
-            
+
             try:
                 yield pangolin_model, probe, handles, cfg, tissue_idx
             finally:
                 del pangolin_model, probe
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
+
+    def _iter_psi_models(self):
+        """Yield (pangolin_model, tissue_idx) for the PSI-tuned Pangolin files.
+        Only populated if `use_psi_models=True`."""
+        for pangolin_path, tissue_idx in self._psi_specs:
+            pangolin_model = load_frozen_pangolin(pangolin_path, self.device)
+            try:
+                yield pangolin_model, tissue_idx
+            finally:
+                del pangolin_model
                 if self.device.type == "cuda":
                     torch.cuda.empty_cache()
 
@@ -357,29 +418,37 @@ class BiPangolinRunner:
         seq_t = one_hot_encode(padded).unsqueeze(0).to(self.device)
 
         prob_sums = {t: torch.zeros(L_out) for t in self.tissues_present}
-        psi_sums  = {t: torch.zeros(L_out) for t in self.tissues_present}
-        count     = {t: 0 for t in self.tissues_present}
+        psi_sums  = {t: torch.zeros(L_out) for t in self.tissues_present} if self.use_psi_models else None
+        psi_counts = {t: 0 for t in self.tissues_present} if self.use_psi_models else None
         probe_sum = torch.zeros(3, L_out)
         probe_sums_per_tissue = (
             {t: torch.zeros(3, L_out) for t in self.tissues_present}
             if self.per_tissue_probes else None
         )
 
+        # Pass 1: P-tuned models — collect P + probe outputs.
         for pangolin_model, probe, handles, cfg, tissue_idx in self._iter_pairs():
             pangolin_out, probe_probs = self._forward_one(
                 pangolin_model, probe, handles, cfg, seq_t)
             prob_sums[tissue_idx] += pangolin_out[PROB_CHANNEL_PER_TISSUE[tissue_idx], :L_out].cpu()
-            psi_sums[tissue_idx]  += pangolin_out[PSI_CHANNEL_PER_TISSUE[tissue_idx], :L_out].cpu()
-            count[tissue_idx] += 1
             p = probe_probs[:, :L_out].cpu()
             probe_sum += p
             if probe_sums_per_tissue is not None:
                 probe_sums_per_tissue[tissue_idx] += p
 
+        # Pass 2 (optional): PSI-tuned models — collect PSI only.
+        if self.use_psi_models:
+            for pangolin_model, tissue_idx in self._iter_psi_models():
+                with torch.no_grad():
+                    pangolin_out = pangolin_model(seq_t)[0]
+                psi_sums[tissue_idx]  += pangolin_out[PSI_CHANNEL_PER_TISSUE[tissue_idx], :L_out].cpu()
+                psi_counts[tissue_idx] += 1
+
         return self._assemble_result(
             prob_sums,
             psi_sums,
             probe_sum,
+            psi_counts=psi_counts,
             metadata={"length": L_out, "tiled": False},
             probe_sums_per_tissue=probe_sums_per_tissue,
         )
@@ -404,15 +473,23 @@ class BiPangolinRunner:
         padded_t = one_hot_encode(padded).to(self.device)
 
         prob_sums = {t: torch.zeros(L_out) for t in self.tissues_present}
-        psi_sums = {t: torch.zeros(L_out) for t in self.tissues_present}
+        psi_sums = (
+            {t: torch.zeros(L_out) for t in self.tissues_present}
+            if self.use_psi_models else None
+        )
         probe_sum = torch.zeros(3, L_out)
         weight_sum = torch.zeros(L_out)
         tissue_weight_sum = {t: torch.zeros(L_out) for t in self.tissues_present}
+        psi_tissue_weight_sum = (
+            {t: torch.zeros(L_out) for t in self.tissues_present}
+            if self.use_psi_models else None
+        )
         probe_sums_per_tissue = (
             {t: torch.zeros(3, L_out) for t in self.tissues_present}
             if self.per_tissue_probes else None
         )
 
+        # Pass 1: P-tuned models — P + probe.
         for pangolin_model, probe, handles, cfg, tissue_idx in self._iter_pairs():
             for start in starts:
                 window = padded_t[:, start:start + WINDOW_LEN].unsqueeze(0)
@@ -426,8 +503,6 @@ class BiPangolinRunner:
 
                 prob_sums[tissue_idx][lo:hi] += (
                     pangolin_out[PROB_CHANNEL_PER_TISSUE[tissue_idx], :n].cpu() * w)
-                psi_sums[tissue_idx][lo:hi] += (
-                    pangolin_out[PSI_CHANNEL_PER_TISSUE[tissue_idx], :n].cpu() * w)
                 p_w = probe_probs[:, :n].cpu() * w.unsqueeze(0)
                 probe_sum[:, lo:hi] += p_w
                 if probe_sums_per_tissue is not None:
@@ -435,13 +510,30 @@ class BiPangolinRunner:
                 tissue_weight_sum[tissue_idx][lo:hi] += w
                 weight_sum[lo:hi] += w
 
+        # Pass 2 (optional): PSI-tuned models — PSI only.
+        if self.use_psi_models:
+            for pangolin_model, tissue_idx in self._iter_psi_models():
+                for start in starts:
+                    window = padded_t[:, start:start + WINDOW_LEN].unsqueeze(0)
+                    with torch.no_grad():
+                        pangolin_out = pangolin_model(window)[0]
+                    lo = start
+                    hi = min(start + USABLE_LEN, L_out)
+                    n = hi - lo
+                    w = blend[:n]
+                    psi_sums[tissue_idx][lo:hi] += (
+                        pangolin_out[PSI_CHANNEL_PER_TISSUE[tissue_idx], :n].cpu() * w)
+                    psi_tissue_weight_sum[tissue_idx][lo:hi] += w
+
         for tissue_idx in self.tissues_present:
             weights = tissue_weight_sum[tissue_idx].clamp_min(1e-9)
             prob_sums[tissue_idx] = prob_sums[tissue_idx] / weights
-            psi_sums[tissue_idx] = psi_sums[tissue_idx] / weights
             if probe_sums_per_tissue is not None:
                 probe_sums_per_tissue[tissue_idx] = (
                     probe_sums_per_tissue[tissue_idx] / weights.unsqueeze(0))
+            if self.use_psi_models:
+                psi_weights = psi_tissue_weight_sum[tissue_idx].clamp_min(1e-9)
+                psi_sums[tissue_idx] = psi_sums[tissue_idx] / psi_weights
         probe_sum = probe_sum / weight_sum.clamp_min(1e-9).unsqueeze(0)
 
         return self._assemble_result(
@@ -522,16 +614,20 @@ class BiPangolinRunner:
 
     def _assemble_result(self, prob_sums, psi_sums, probe_sum, metadata=None,
                          skip_pair_normalisation=False,
-                         probe_sums_per_tissue=None):
+                         probe_sums_per_tissue=None,
+                         psi_counts=None):
         if not skip_pair_normalisation:
             pair_tissues = [t for _, _, t in self._pair_specs]
+            psi_tissues  = [t for _, t in self._psi_specs] if self.use_psi_models else []
             for tissue_idx in self.tissues_present:
                 n_tissue = pair_tissues.count(tissue_idx)
                 prob_sums[tissue_idx] = prob_sums[tissue_idx] / max(n_tissue, 1)
-                psi_sums[tissue_idx] = psi_sums[tissue_idx] / max(n_tissue, 1)
                 if probe_sums_per_tissue is not None:
                     probe_sums_per_tissue[tissue_idx] = (
                         probe_sums_per_tissue[tissue_idx] / max(n_tissue, 1))
+                if psi_sums is not None:
+                    n_psi = psi_counts[tissue_idx] if psi_counts is not None else psi_tissues.count(tissue_idx)
+                    psi_sums[tissue_idx] = psi_sums[tissue_idx] / max(n_psi, 1)
             probe_sum = probe_sum / len(self._pair_specs)
 
         probe_sum = self._apply_correction(probe_sum)
@@ -543,9 +639,14 @@ class BiPangolinRunner:
                          for t in self.tissues_present]
             probe_per_tissue = torch.stack(corrected, dim=1)
 
+        pangolin_psi_t = (
+            torch.stack([psi_sums[t] for t in self.tissues_present])
+            if psi_sums is not None else None
+        )
+
         return BiPangolinResult(
             pangolin_prob=torch.stack([prob_sums[t] for t in self.tissues_present]),
-            pangolin_psi=torch.stack([psi_sums[t] for t in self.tissues_present]),
+            pangolin_psi=pangolin_psi_t,
             probe_none=probe_sum[NONE_CLASS],
             probe_acceptor=probe_sum[ACC_CLASS],
             probe_donor=probe_sum[DON_CLASS],
