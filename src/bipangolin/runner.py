@@ -312,7 +312,15 @@ class BiPangolinRunner:
                     f"use_psi_models=True but no PSI-tuned Pangolin models "
                     f"(final.*.[1357].3.v2) found in {self.pangolin_model_dir}"
                 )
-            self._psi_specs = psi_candidates
+            # Defensive: drop PSI candidates for tissues we don't have probes
+            # (P-tuned models) for, since the result tissue dimension follows
+            # the probe set. With a full Pangolin install this filter is a no-op.
+            probe_tissues = {t for _, _, t in self._pair_specs}
+            self._psi_specs = [(p, t) for (p, t) in psi_candidates if t in probe_tissues]
+            dropped = len(psi_candidates) - len(self._psi_specs)
+            if dropped:
+                print(f"biPangolin: dropped {dropped} PSI-tuned models for tissues "
+                      f"without matching P-tuned probes")
 
         self.tissues_present = sorted({t for _, _, t in self._pair_specs})
         self.tissue_names = tuple(TISSUE_NAMES[t] for t in self.tissues_present)
