@@ -48,6 +48,17 @@ from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from pathlib import Path
 
+# Prefer the in-repo bipangolin source over any pip-installed version on
+# PYTHONPATH. This script lives at <repo>/benchmark/bench_score.py, so the
+# package source lives at <repo>/src/bipangolin/. Inserting that path first
+# guarantees we get THIS repo's runner.py (with use_psi_models etc.) and the
+# probes shipped at <repo>/src/bipangolin/data/probes/, never the older
+# installed copy.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_LOCAL_SRC = _REPO_ROOT / "src"
+if _LOCAL_SRC.is_dir():
+    sys.path.insert(0, str(_LOCAL_SRC))
+
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -56,6 +67,8 @@ import torch
 
 from bipangolin import BiPangolinRunner
 from bipangolin.runner import TISSUE_NAMES
+import bipangolin as _bp
+print(f"using bipangolin from: {Path(_bp.__file__).parent}", file=sys.stderr)
 
 
 NONE_CLASS, ACC_CLASS, DON_CLASS = 0, 1, 2
@@ -418,8 +431,10 @@ def main():
     ap.add_argument("--chroms", nargs="+", default=["chr1", "chr9"])
     ap.add_argument("--device", default="auto",
                     help="auto | cuda | mps | cpu (default: auto)")
-    ap.add_argument("--probe-dir", default=None,
-                    help="Override probe directory (default: shipped probes)")
+    ap.add_argument("--probe-dir",
+                    default=str(_REPO_ROOT / "src" / "bipangolin" / "data" / "probes"),
+                    help="Probe directory (default: <repo>/src/bipangolin/data/probes — "
+                         "the freshly-trained probes in this checkout, NOT the pip-installed copy).")
     ap.add_argument("--pangolin-model-dir", default=None,
                     help="Override Pangolin weights directory")
     ap.add_argument("--skip-spliceai", action="store_true",
