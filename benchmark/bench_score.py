@@ -300,10 +300,18 @@ def score_gene(runner, fasta, chrom, gene_id, site_set, chrom_sites,
         if result.pangolin_psi is not None else None
     )
     tissues = list(result.tissues)
-    # Per-tissue probe outputs, shape (3, n_tissues, L) or None.
+    # Per-tissue probe outputs (P-tuned side), shape (3, n_tissues, L) or None.
     probe_per_tissue = (
         result.probe_per_tissue.detach().cpu().numpy()
         if result.probe_per_tissue is not None else None
+    )
+    # Per-tissue probe outputs from probes attached to PSI-tuned Pangolin
+    # models. Shape (3, n_tissues, L) or None. Use these when comparing
+    # against pangolin_psi_* — comparing P-tuned-probe outputs against PSI
+    # mixes activations from two different fine-tunes.
+    probe_per_tissue_psi = (
+        result.probe_per_tissue_psi.detach().cpu().numpy()
+        if result.probe_per_tissue_psi is not None else None
     )
 
     # SpliceAI (per-position acceptor / donor; may be shorter than L)
@@ -360,10 +368,17 @@ def score_gene(runner, fasta, chrom, gene_id, site_set, chrom_sites,
             out[f"probe_none_{t}"] = probe_per_tissue[0, i].astype(np.float16)
             out[f"probe_acc_{t}"] = probe_per_tissue[1, i].astype(np.float16)
             out[f"probe_don_{t}"] = probe_per_tissue[2, i].astype(np.float16)
+    if probe_per_tissue_psi is not None:
+        # Probe outputs from probes attached to the PSI-tuned Pangolin models.
+        for i, t in enumerate(tissues):
+            out[f"probe_none_psi_{t}"] = probe_per_tissue_psi[0, i].astype(np.float16)
+            out[f"probe_acc_psi_{t}"]  = probe_per_tissue_psi[1, i].astype(np.float16)
+            out[f"probe_don_psi_{t}"]  = probe_per_tissue_psi[2, i].astype(np.float16)
     return out
 
 
-def _arrow_schema(tissues, per_tissue_probes=False, include_psi=True):
+def _arrow_schema(tissues, per_tissue_probes=False, include_psi=True,
+                  per_tissue_probes_psi=False):
     fields = [
         ("chrom", pa.string()),
         ("gene_id", pa.string()),
@@ -386,6 +401,11 @@ def _arrow_schema(tissues, per_tissue_probes=False, include_psi=True):
             fields.append((f"probe_none_{t}", pa.float16()))
             fields.append((f"probe_acc_{t}", pa.float16()))
             fields.append((f"probe_don_{t}", pa.float16()))
+    if per_tissue_probes_psi:
+        for t in tissues:
+            fields.append((f"probe_none_psi_{t}", pa.float16()))
+            fields.append((f"probe_acc_psi_{t}",  pa.float16()))
+            fields.append((f"probe_don_psi_{t}",  pa.float16()))
     return pa.schema(fields)
 
 
@@ -488,9 +508,16 @@ def main():
 
     fasta = pyfastx.Fasta(args.fasta)
 
+    # PSI-side per-tissue probe columns are written when BOTH flags are on
+    # AND the user has trained probes for the PSI-tuned Pangolin models.
+    per_tissue_probes_psi = (args.per_tissue_probes and args.use_psi_models
+                             and getattr(runner, "_psi_has_probes", False))
     schema = _arrow_schema(list(TISSUE_NAMES),
                            per_tissue_probes=args.per_tissue_probes,
-                           include_psi=args.use_psi_models)
+                           include_psi=args.use_psi_models,
+                           per_tissue_probes_psi=per_tissue_probes_psi)
+    if per_tissue_probes_psi:
+        print("biPangolin: PSI-side per-tissue probe columns will be written.")
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
