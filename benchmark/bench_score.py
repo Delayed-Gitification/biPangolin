@@ -338,6 +338,21 @@ def score_gene(runner, fasta, chrom, gene_id, site_set, chrom_sites,
         sai_don = np.full(L, np.nan, dtype=np.float32)
 
     # Labels — vectorise lookup from chrom_sites
+    #
+    # KNOWN BUG (corrected downstream, not here): this loops over `site_set`,
+    # i.e. only THIS gene's own splice sites. When this gene's scored region
+    # overlaps a neighbouring/overlapping gene, that other gene's real splice
+    # sites fall inside the region but are absent from `site_set`, so they are
+    # emitted as label 0 ("none") despite being genuine sites with identical
+    # sequence/score. This produces contradictory rows (same genomic pos
+    # labelled donor by one gene and none by another) that show up as the
+    # strongest "false positives" in PR curves. The correct behaviour is the
+    # one train_probes.py uses: label every position in the region from the
+    # chromosome-wide `chrom_sites` map (see train_probes.py tile_windows,
+    # which pulls positives from the chrom-wide sorted site list and excludes
+    # them from the negative pool). We do NOT fix it here to avoid an expensive
+    # re-score; paper_figures.ipynb's load_bench_arrays corrects the labels in
+    # place via a groupby-max on (chrom, pos).
     label = np.zeros(L, dtype=np.int8)
     abs_positions = np.arange(region_start, region_start + L)
     # site_set inside region:
