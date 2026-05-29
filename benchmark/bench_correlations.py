@@ -156,6 +156,18 @@ def detect_columns(schema_names):
             derived.append((f"probe_max_psi_{t}",
                             lambda cd, _a=ca, _d=cd_:
                                 np.maximum(cd[_a], cd[_d])))
+        # PSI-side probe ensemble: tissue-mean of the PSI-side probes, then
+        # max(acc, don) — mirrors pangolin_psi_ensemble (mean over tissues).
+        # (The P-side ensemble `probe_max` comes from the runner's own
+        # fold×tissue ensemble; the PSI side has no runner ensemble in the
+        # parquet, so we build the analogous tissue-mean here.)
+        _acc_psi = [f"probe_acc_psi_{t}" for t in TISSUE_ORDER]
+        _don_psi = [f"probe_don_psi_{t}" for t in TISSUE_ORDER]
+        derived.append(("probe_max_psi_ensemble",
+                        lambda cd, _a=_acc_psi, _d=_don_psi:
+                            np.maximum(
+                                np.mean(np.stack([cd[c] for c in _a], axis=0), axis=0),
+                                np.mean(np.stack([cd[c] for c in _d], axis=0), axis=0))))
 
     all_names = native + [name for name, _ in derived]
     return native, derived, all_names
