@@ -22,13 +22,16 @@ Native (auto-detected from parquet schema):
     pangolin_p_{tissues}, pangolin_psi_{tissues}                     — per tissue
     spliceai_acc, spliceai_don
     probe_none_{tissues}, probe_acc_{tissues}, probe_don_{tissues}   — per-tissue probe (if present)
+    probe_none_psi_{tissues}, probe_acc_psi_{tissues}, probe_don_psi_{tissues}
+                                                                     — PSI-side per-tissue probe (if present)
 
 Derived:
-    spliceai_max          = max(spliceai_acc, spliceai_don)
-    probe_max             = max(probe_acc, probe_don)                       (ensemble)
-    probe_max_{tissue}    = max(probe_acc_{tissue}, probe_don_{tissue})     (if per-tissue cols present)
-    pangolin_p_ensemble   = mean over tissues of pangolin_p
-    pangolin_psi_ensemble = mean over tissues of pangolin_psi
+    spliceai_max            = max(spliceai_acc, spliceai_don)
+    probe_max               = max(probe_acc, probe_don)                       (ensemble)
+    probe_max_{tissue}      = max(probe_acc_{tissue}, probe_don_{tissue})     (if per-tissue cols present)
+    probe_max_psi_{tissue}  = max(probe_acc_psi_{tissue}, probe_don_psi_{tissue}) (if PSI-side cols present)
+    pangolin_p_ensemble     = mean over tissues of pangolin_p
+    pangolin_psi_ensemble   = mean over tissues of pangolin_psi
 
 Subsets: all, acceptors, donors, nonsites.
 NaN policy: rows with NaN in any column are dropped (consistent denominator).
@@ -111,6 +114,17 @@ def detect_columns(schema_names):
             for ch in ("none", "acc", "don"):
                 native.append(f"probe_{ch}_{t}")
 
+    # PSI-side per-tissue probe outputs (present in parquets written with
+    # both --per-tissue-probes and --use-psi-models, when PSI-side probes exist)
+    has_per_tissue_probes_psi = all(
+        f"probe_{ch}_psi_{t}" in available
+        for ch in ("none", "acc", "don") for t in TISSUE_ORDER
+    )
+    if has_per_tissue_probes_psi:
+        for t in TISSUE_ORDER:
+            for ch in ("none", "acc", "don"):
+                native.append(f"probe_{ch}_psi_{t}")
+
     # Derived columns (operate on a dict mapping native column name -> ndarray)
     derived = []
     derived.append(("spliceai_max",
@@ -133,6 +147,13 @@ def detect_columns(schema_names):
         for t in TISSUE_ORDER:
             ca, cd_ = f"probe_acc_{t}", f"probe_don_{t}"
             derived.append((f"probe_max_{t}",
+                            lambda cd, _a=ca, _d=cd_:
+                                np.maximum(cd[_a], cd[_d])))
+
+    if has_per_tissue_probes_psi:
+        for t in TISSUE_ORDER:
+            ca, cd_ = f"probe_acc_psi_{t}", f"probe_don_psi_{t}"
+            derived.append((f"probe_max_psi_{t}",
                             lambda cd, _a=ca, _d=cd_:
                                 np.maximum(cd[_a], cd[_d])))
 
@@ -161,15 +182,19 @@ def maybe_correct_probes(col_dict, k):
         col_dict["probe_none"] = cn
         col_dict["probe_acc"] = ca
         col_dict["probe_don"] = cd
-    # Per-tissue
-    for t in TISSUE_ORDER:
-        n, a, d = f"probe_none_{t}", f"probe_acc_{t}", f"probe_don_{t}"
-        if all(c in col_dict for c in (n, a, d)):
-            cn, ca, cd = _apply_probe_correction(
-                col_dict[n], col_dict[a], col_dict[d], k)
-            col_dict[n] = cn
-            col_dict[a] = ca
-            col_dict[d] = cd
+    # Per-tissue (P-side) and PSI-side per-tissue
+    for prefix_a, prefix_d, prefix_n in (
+        ("probe_acc_{}", "probe_don_{}", "probe_none_{}"),
+        ("probe_acc_psi_{}", "probe_don_psi_{}", "probe_none_psi_{}"),
+    ):
+        for t in TISSUE_ORDER:
+            n, a, d = prefix_n.format(t), prefix_a.format(t), prefix_d.format(t)
+            if all(c in col_dict for c in (n, a, d)):
+                cn, ca, cd = _apply_probe_correction(
+                    col_dict[n], col_dict[a], col_dict[d], k)
+                col_dict[n] = cn
+                col_dict[a] = ca
+                col_dict[d] = cd
 
 
 # ---------------------------------------------------------------------------
