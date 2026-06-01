@@ -277,12 +277,10 @@ def score_vcf(runner, vcf_in: Union[str, Path], vcf_out: Union[str, Path],
         '[|TISSUE:DS_GAIN:DS_LOSS:DP_GAIN:DP_LOSS]">'
     )
 
-    # Collect per-line annotations grouped by VCF line, since multi-allelics
-    # split into multiple records but we want to write one VCF row per line.
-    pending = {}    # line_id -> {"line": str, "annots": [str, ...]}
     n_scored = 0
 
-    # First pass: write header + score variants
+    # Optional progress bar. We stream the file, so there's no cheap total to
+    # show — tqdm just counts lines as they go.
     if progress:
         try:
             from tqdm import tqdm
@@ -291,58 +289,62 @@ def score_vcf(runner, vcf_in: Union[str, Path], vcf_out: Union[str, Path],
     else:
         def tqdm(x, **k): return x
 
+    # Single-pass streaming: read one line, score it, write it, discard it.
+    # Never hold the whole VCF in memory — a whole-genome VCF can be tens of GB
+    # uncompressed, so the previous fh.readlines() + per-line dict approach
+    # would OOM. Each variant line is fully self-contained (we append our INFO
+    # field immediately), and multi-allelic ALTs are split/rejoined inline.
     out_fh = open(vcf_out, "w")
     written_header = False
+
+    def _inject_header_if_needed():
+        # Safety net for malformed VCFs that have no #CHROM line: make sure our
+        # INFO definition is emitted before the first data row regardless.
+        nonlocal written_header
+        if not written_header:
+            out_fh.write(info_header + "\n")
+            written_header = True
 
     try:
         opener = (lambda p: __import__("gzip").open(p, "rt")) \
                  if str(vcf_in).endswith(".gz") else open
         with opener(vcf_in) as fh:
-            lines = fh.readlines()
-
-        # Write headers, injecting our INFO definition before #CHROM
-        for line in lines:
-            if line.startswith("##"):
-                out_fh.write(line)
-            elif line.startswith("#CHROM"):
-                out_fh.write(info_header + "\n")
-                out_fh.write(line)
-                written_header = True
-                break
-
-        # Score variants
-        annots_by_line_idx = {}
-        variant_lines = [(i, ln) for i, ln in enumerate(lines)
-                         if not ln.startswith("#")]
-
-        for line_idx, line in tqdm(variant_lines, desc="Scoring variants"):
-            parts = line.rstrip("\n").split("\t")
-            chrom, pos, vid, ref, alts, qual, filt, info = parts[:8]
-            line_annots = []
-            for alt in alts.split(","):
-                if alt in (".", "*", ""):
-                    line_annots.append(f"{alt}|.|.|.|.|.|.|.|.")
+            for line in tqdm(fh, desc="Scoring variants", unit=" lines"):
+                if line.startswith("#CHROM"):
+                    out_fh.write(info_header + "\n")
+                    out_fh.write(line)
+                    written_header = True
                     continue
-                try:
-                    score = score_variant(runner, fasta, chrom, int(pos), ref, alt,
-                                          distance=distance)
-                    line_annots.append(score.to_info_string(tissue=tissue_for_info))
-                    n_scored += 1
-                except Exception as e:
-                    print(f"  warning: failed on {chrom}:{pos} {ref}>{alt}: {e}",
-                          file=sys.stderr)
-                    line_annots.append(f"{alt}|.|.|.|.|.|.|.|.")
-            annots_by_line_idx[line_idx] = line_annots
+                if line.startswith("#"):
+                    out_fh.write(line)
+                    continue
 
-        # Write variant lines with annotation appended to INFO
-        for line_idx, line in variant_lines:
-            parts = line.rstrip("\n").split("\t")
-            info_field = parts[7] if parts[7] != "." else ""
-            annot_str = "biPangolin=" + ",".join(annots_by_line_idx[line_idx])
-            new_info = (info_field + ";" + annot_str) if info_field else annot_str
-            parts[7] = new_info
-            out_fh.write("\t".join(parts) + "\n")
+                # Variant data row.
+                _inject_header_if_needed()
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 8:
+                    out_fh.write(line)   # pass through malformed rows untouched
+                    continue
+                chrom, pos, vid, ref, alts, qual, filt, info = parts[:8]
+                line_annots = []
+                for alt in alts.split(","):
+                    if alt in (".", "*", ""):
+                        line_annots.append(f"{alt}|.|.|.|.|.|.|.|.")
+                        continue
+                    try:
+                        score = score_variant(runner, fasta, chrom, int(pos), ref, alt,
+                                              distance=distance)
+                        line_annots.append(score.to_info_string(tissue=tissue_for_info))
+                        n_scored += 1
+                    except Exception as e:
+                        print(f"  warning: failed on {chrom}:{pos} {ref}>{alt}: {e}",
+                              file=sys.stderr)
+                        line_annots.append(f"{alt}|.|.|.|.|.|.|.|.")
 
+                info_field = parts[7] if parts[7] != "." else ""
+                annot_str = "biPangolin=" + ",".join(line_annots)
+                parts[7] = (info_field + ";" + annot_str) if info_field else annot_str
+                out_fh.write("\t".join(parts) + "\n")
     finally:
         out_fh.close()
 

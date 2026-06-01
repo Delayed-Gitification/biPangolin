@@ -262,16 +262,49 @@ class BiPangolinResult:
 # Runner
 # ---------------------------------------------------------------------------
 
+def _mps_is_healthy() -> bool:
+    """Probe whether the MPS backend handles the ops Pangolin relies on.
+
+    PyTorch's Metal (Apple Silicon) backend has historically mis-handled
+    high-dilation 1D convolutions (Pangolin uses atrous rates up to 25) and
+    boolean-mask indexing (used in four_track_per_tissue) — sometimes returning
+    NaNs or raising deep in the forward pass. We run a tiny representative
+    computation and confirm the result is finite before trusting MPS.
+    """
+    try:
+        dev = torch.device("mps")
+        x = torch.randn(1, 4, 256, device=dev)
+        conv = nn.Conv1d(4, 8, kernel_size=3, dilation=25, padding=25).to(dev)
+        y = conv(x)
+        mask = y[0, 0] > 0
+        _ = y[..., mask]  # boolean indexing along last dim
+        return bool(torch.isfinite(y).all().item())
+    except Exception:
+        return False
+
+
 def _resolve_device(device):
     if isinstance(device, torch.device):
-        return device
-    if device == "auto":
+        resolved = device
+    elif device == "auto":
         if torch.cuda.is_available():
-            return torch.device("cuda")
-        if torch.backends.mps.is_available():
-            return torch.device("mps")
-        return torch.device("cpu")
-    return torch.device(device)
+            resolved = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            resolved = torch.device("mps")
+        else:
+            resolved = torch.device("cpu")
+    else:
+        resolved = torch.device(device)
+
+    if resolved.type == "mps" and not _mps_is_healthy():
+        print(
+            "biPangolin: WARNING — the MPS (Apple Silicon) backend failed a "
+            "health check (high-dilation conv1d / boolean indexing errored or "
+            "produced NaN). Falling back to CPU.",
+            file=sys.stderr,
+        )
+        resolved = torch.device("cpu")
+    return resolved
 
 
 class BiPangolinRunner:
