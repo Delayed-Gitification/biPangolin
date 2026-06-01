@@ -2,11 +2,11 @@
 Train a donor/acceptor/none probe on Pangolin's penultimate (skip) activations.
 
 Pipeline per Pangolin model file:
-  1. Parse GTF for + strand splice sites and gene extents (forward strand only).
-  2. For each + strand gene, build a region from
+  1. Parse GTF for + and - strand splice sites and gene extents.
+  2. For each gene, build a region from
         [min_splice_site - 5000, max_splice_site + 5000]
      and tile that region into overlapping windows.
-  3. Within each window, label ALL forward-strand splice sites that fall in
+  3. Within each window, label ALL relevant-strand splice sites that fall in
      its usable region — including those from neighbouring/overlapping genes
      so the probe doesn't see real sites mislabelled as 'none'.
   4. Run frozen Pangolin once per window; cache activations at donor + acceptor
@@ -45,7 +45,7 @@ USABLE_LEN = WINDOW_LEN - 2 * PANGOLIN_CROP   # = 10000
 DEFAULT_OVERLAP = 2000
 GENE_FLANK = 5000
 
-K_MAX_RADIUS = 2
+K_MAX_RADIUS = 0
 K_MAX = 2 * K_MAX_RADIUS + 1   
 
 # Class encoding
@@ -57,8 +57,13 @@ TEST_CHROMS = {"chr1", "chr9"}
 
 
 # ---------------------------------------------------------------------------
-# One-hot encoding
+# Sequence Utilities & One-hot encoding
 # ---------------------------------------------------------------------------
+
+_COMPLEMENT = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+
+def reverse_complement(seq: str) -> str:
+    return seq.translate(_COMPLEMENT)[::-1]
 
 _BASE_TO_IDX = {b: i for i, b in enumerate("NACGT")}
 IN_MAP = torch.tensor([
@@ -80,8 +85,8 @@ def one_hot_encode(seq: str) -> torch.Tensor:
 # GTF parsing
 # ---------------------------------------------------------------------------
 
-def parse_gtf(gtf_path, chroms=None):
-    """Parse a GTF for + strand exons.
+def parse_gtf(gtf_path, chroms=None, strand_to_parse="+"):
+    """Parse a GTF for exons on the specified strand.
 
     Uses transcript-level exon ordering to exclude:
       - The acceptor position of each transcript's first exon (TSS, not a real acceptor)
@@ -92,7 +97,6 @@ def parse_gtf(gtf_path, chroms=None):
       genes: dict[chrom] -> list[(gene_id, set_of_splice_site_positions)]
     """
     # Pass 1: collect all exons grouped by transcript
-    # transcript_exons: {(chrom, transcript_id): [(start_1based, end_1based), ...]}
     transcript_exons = {}
     transcript_gene = {}     # transcript_id -> gene_id
     transcript_chrom = {}    # transcript_id -> chrom
@@ -103,14 +107,14 @@ def parse_gtf(gtf_path, chroms=None):
         for line in fh:
             n_lines += 1
             if n_lines % 1_000_000 == 0:
-                print(f"    parsed {n_lines:,} GTF lines, {n_exons:,} + strand exons so far")
+                print(f"    parsed {n_lines:,} GTF lines, {n_exons:,} {strand_to_parse} strand exons so far")
             if line.startswith("#"):
                 continue
             parts = line.rstrip("\n").split("\t")
             if len(parts) < 9:
                 continue
             chrom, _, feature, start, end, _, strand, _, attrs = parts[:9]
-            if feature != "exon" or strand != "+":
+            if feature != "exon" or strand != strand_to_parse:
                 continue
             if chroms is not None and chrom not in chroms:
                 continue
@@ -134,7 +138,8 @@ def parse_gtf(gtf_path, chroms=None):
     n_don_skipped = 0   # last-exon donors skipped
 
     for (chrom, transcript_id), exons in transcript_exons.items():
-        exons_sorted = sorted(exons, key=lambda e: e[0])
+        # Sort exons in reverse order for negative strand to process from 5' to 3'
+        exons_sorted = sorted(exons, key=lambda e: e[0], reverse=(strand_to_parse == "-"))
         gene_id = transcript_gene[transcript_id]
         n_transcripts += 1
 
@@ -143,8 +148,13 @@ def parse_gtf(gtf_path, chroms=None):
         site_set = chrom_genes.setdefault(gene_id, set())
 
         for i, (start, end) in enumerate(exons_sorted):
-            acc_pos = start - 1   # first exonic base (0-based)
-            don_pos = end - 1     # last exonic base (0-based)
+            if strand_to_parse == "+":
+                acc_pos = start - 1   # first exonic base (0-based)
+                don_pos = end - 1     # last exonic base (0-based)
+            else:
+                acc_pos = end - 1     # first exonic base for negative strand
+                don_pos = start - 1   # last exonic base for negative strand
+
             is_first = (i == 0)
             is_last  = (i == len(exons_sorted) - 1)
 
@@ -177,7 +187,7 @@ def parse_gtf(gtf_path, chroms=None):
     genes = {chrom: list(d.items()) for chrom, d in gene_sites.items()}
     n_sites_total = sum(len(d) for d in sites.values())
     n_genes_total = sum(len(d) for d in genes.values())
-    print(f"    {n_exons:,} + strand exons across {n_transcripts:,} transcripts -> "
+    print(f"    {n_exons:,} {strand_to_parse} strand exons across {n_transcripts:,} transcripts -> "
           f"{n_sites_total:,} clean splice sites in {n_genes_total:,} genes "
           f"across {len(sites)} chroms "
           f"(skipped {n_acc_skipped:,} TSS acceptors, {n_don_skipped:,} TTS donors)")
@@ -199,7 +209,7 @@ def _extract_attr(attrs, key):
 
 def tile_windows(sites_by_chrom, genes_by_chrom, fasta,
                  none_subsample_ratio=10, overlap=DEFAULT_OVERLAP,
-                 seed=0, max_genes=None):
+                 seed=0, max_genes=None, strand="+"):
     assert overlap < USABLE_LEN, "overlap must be < usable region length"
     rng = random.Random(seed)
     stride = WINDOW_LEN - overlap
@@ -272,7 +282,7 @@ def tile_windows(sites_by_chrom, genes_by_chrom, fasta,
 
                 centers = torch.tensor([p for p, _ in pos_labels], dtype=torch.long)
                 labels = torch.tensor([c for _, c in pos_labels], dtype=torch.long)
-                records.append((chrom, w_start, centers, labels))
+                records.append((chrom, w_start, centers, labels, strand))
 
     return records
 
@@ -296,9 +306,14 @@ class WindowDataset(Dataset):
         return len(self.records)
 
     def __getitem__(self, idx):
-        chrom, w_start, centers, labels = self.records[idx]
+        chrom, w_start, centers, labels, strand = self.records[idx]
         fasta = self._get_fasta()
         seq = fasta[chrom][w_start:w_start + WINDOW_LEN].seq
+        
+        if strand == "-":
+            seq = reverse_complement(seq)
+            centers = WINDOW_LEN - 1 - centers
+
         return one_hot_encode(seq), centers, labels
 
 
@@ -593,21 +608,25 @@ def build_loaders(fasta_path, gtf_path, none_subsample_ratio, overlap, batch_siz
                   max_genes_train=None, max_genes_val=None, max_genes_test=None):
     fasta = pyfastx.Fasta(fasta_path)
 
-    print("Parsing GTF...")
-    train_sites, train_genes = parse_gtf(gtf_path, chroms=TRAIN_CHROMS)
-    val_sites, val_genes = parse_gtf(gtf_path, chroms=VAL_CHROMS)
-    test_sites, test_genes = parse_gtf(gtf_path, chroms=TEST_CHROMS)
+    print("Parsing GTF and tiling windows...")
+    train_recs, val_recs, test_recs = [], [], []
+    
+    for strand in ["+", "-"]:
+        print(f"--- Processing {strand} strand ---")
+        train_sites, train_genes = parse_gtf(gtf_path, chroms=TRAIN_CHROMS, strand_to_parse=strand)
+        val_sites, val_genes = parse_gtf(gtf_path, chroms=VAL_CHROMS, strand_to_parse=strand)
+        test_sites, test_genes = parse_gtf(gtf_path, chroms=TEST_CHROMS, strand_to_parse=strand)
 
-    print("Tiling windows...")
-    train_recs = tile_windows(train_sites, train_genes, fasta, none_subsample_ratio, overlap,
-                              max_genes=max_genes_train)
-    val_recs = tile_windows(val_sites, val_genes, fasta, none_subsample_ratio, overlap,
-                            max_genes=max_genes_val)
-    test_recs = tile_windows(test_sites, test_genes, fasta, none_subsample_ratio, overlap,
-                             max_genes=max_genes_test)
-    print(f"  train: {len(train_recs)} windows")
-    print(f"  val:   {len(val_recs)} windows")
-    print(f"  test:  {len(test_recs)} windows")
+        train_recs += tile_windows(train_sites, train_genes, fasta, none_subsample_ratio, overlap,
+                                   max_genes=max_genes_train, strand=strand)
+        val_recs += tile_windows(val_sites, val_genes, fasta, none_subsample_ratio, overlap,
+                                 max_genes=max_genes_val, strand=strand)
+        test_recs += tile_windows(test_sites, test_genes, fasta, none_subsample_ratio, overlap,
+                                  max_genes=max_genes_test, strand=strand)
+        
+    print(f"  Total train: {len(train_recs)} windows")
+    print(f"  Total val:   {len(val_recs)} windows")
+    print(f"  Total test:  {len(test_recs)} windows")
 
     def make_loader(recs):
         return DataLoader(WindowDataset(recs, fasta_path),
@@ -762,7 +781,7 @@ if __name__ == "__main__":
         out_dir=out_dir,
         cache_dir=cache_dir,
         batch_size=32,
-        none_subsample_ratio=10,
+        none_subsample_ratio=30,
         max_genes_train=None,
         max_genes_val=None,
         max_genes_test=None,

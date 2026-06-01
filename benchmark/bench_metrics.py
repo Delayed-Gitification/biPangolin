@@ -241,6 +241,57 @@ def compute_chrom_metrics(path, chrom, k_values, tissues, available_cols,
     del pn, pa, pd_
     gc.collect()
 
+    # --- biPangolin PSI-side probe (ensemble average across tissues) ----------
+    psi_probe_cols = [f"probe_{c}_psi_{t}"
+                      for c in ("none", "acc", "don") for t in tissues
+                      if f"probe_{c}_psi_{t}" in available_cols]
+    if psi_probe_cols and all(
+        f"probe_{c}_psi_{t}" in available_cols
+        for c in ("none", "acc", "don") for t in tissues
+    ):
+        _log("  computing PSI-side probe ensemble (mean across tissues)...")
+        pn_psi = np.mean([load_score(f"probe_none_psi_{t}") for t in tissues], axis=0).astype(np.float32)
+        pa_psi = np.mean([load_score(f"probe_acc_psi_{t}")  for t in tissues], axis=0).astype(np.float32)
+        pd_psi = np.mean([load_score(f"probe_don_psi_{t}")  for t in tissues], axis=0).astype(np.float32)
+        gc.collect()
+
+        for k in k_values:
+            method = f"biPangolin_psi_k{int(k)}" if float(k).is_integer() else f"biPangolin_psi_k{k}"
+            s = pn_psi * np.float32(k) + pa_psi + pd_psi
+            np.maximum(s, 1e-12, out=s)
+            c_none = (pn_psi * np.float32(k)) / s
+            c_acc  = pa_psi / s
+            c_don  = pd_psi / s
+            del s
+            gc.collect()
+
+            run_bundle(method, "acceptor", c_acc, is_acc)
+            run_bundle(method, "donor",    c_don, is_don)
+            one_minus_none = np.float32(1.0) - c_none
+            run_bundle(method, "any_site", one_minus_none, is_any)
+            del one_minus_none
+
+            max_acc = (c_acc > c_none) & (c_acc >= c_don)
+            max_don = (c_don > c_none) & (c_don > c_acc)
+            pred = np.where(max_don, 2, np.where(max_acc, 1, 0)).astype(np.int8)
+            del max_acc, max_don
+            full_acc = float((pred == label).mean())
+            pos_mask = (label != NONE_CLASS)
+            pos_acc = float((pred[pos_mask] == label[pos_mask]).mean()) if pos_mask.any() else float("nan")
+            rows.append({"chrom": chrom, "method": method, "task": "3class_argmax",
+                         "metric": "accuracy_all", "value": full_acc,
+                         "n_pos": int(pos_mask.sum()), "n_total": n_total})
+            rows.append({"chrom": chrom, "method": method, "task": "3class_argmax",
+                         "metric": "accuracy_at_truesites", "value": pos_acc,
+                         "n_pos": int(pos_mask.sum()), "n_total": n_total})
+            del c_none, c_acc, c_don, pred, pos_mask
+            gc.collect()
+
+        del pn_psi, pa_psi, pd_psi
+        gc.collect()
+    else:
+        _log("  PSI-side probe columns not found — skipping biPangolin_psi_k* methods.")
+
     # --- Pangolin per-tissue (any-site only) ----------------------------------
     for tt in tissues:
         for col, kind in ((f"pangolin_p_{tt}", "p"), (f"pangolin_psi_{tt}", "psi")):

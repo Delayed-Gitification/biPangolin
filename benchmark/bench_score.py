@@ -19,7 +19,7 @@ Schema (float16 except where noted):
     probe_acc     f16
     probe_don     f16
     pangolin_p_{tissue}   f16    × 4 tissues
-    pangolin_psi_{tissue} f16    × 4 tissues
+    pangolin_psi_{tissue} f16    × 4 tissues   (only if --use-psi-models)
     spliceai_acc  f16
     spliceai_don  f16
 
@@ -48,6 +48,17 @@ from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from pathlib import Path
 
+# Prefer the in-repo bipangolin source over any pip-installed version on
+# PYTHONPATH. This script lives at <repo>/benchmark/bench_score.py, so the
+# package source lives at <repo>/src/bipangolin/. Inserting that path first
+# guarantees we get THIS repo's runner.py (with use_psi_models etc.) and the
+# probes shipped at <repo>/src/bipangolin/data/probes/, never the older
+# installed copy.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_LOCAL_SRC = _REPO_ROOT / "src"
+if _LOCAL_SRC.is_dir():
+    sys.path.insert(0, str(_LOCAL_SRC))
+
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -56,6 +67,8 @@ import torch
 
 from bipangolin import BiPangolinRunner
 from bipangolin.runner import TISSUE_NAMES
+import bipangolin as _bp
+print(f"using bipangolin from: {Path(_bp.__file__).parent}", file=sys.stderr)
 
 
 NONE_CLASS, ACC_CLASS, DON_CLASS = 0, 1, 2
@@ -280,12 +293,25 @@ def score_gene(runner, fasta, chrom, gene_id, site_set, chrom_sites,
     probe_acc = result.probe_acceptor.detach().cpu().numpy()
     probe_don = result.probe_donor.detach().cpu().numpy()
     pangolin_p = result.pangolin_prob.detach().cpu().numpy()    # (T, L)
-    pangolin_psi = result.pangolin_psi.detach().cpu().numpy()   # (T, L)
+    # pangolin_psi is None unless the runner was constructed with
+    # use_psi_models=True (which loads the PSI-tuned weight files).
+    pangolin_psi = (
+        result.pangolin_psi.detach().cpu().numpy()
+        if result.pangolin_psi is not None else None
+    )
     tissues = list(result.tissues)
-    # Per-tissue probe outputs, shape (3, n_tissues, L) or None.
+    # Per-tissue probe outputs (P-tuned side), shape (3, n_tissues, L) or None.
     probe_per_tissue = (
         result.probe_per_tissue.detach().cpu().numpy()
         if result.probe_per_tissue is not None else None
+    )
+    # Per-tissue probe outputs from probes attached to PSI-tuned Pangolin
+    # models. Shape (3, n_tissues, L) or None. Use these when comparing
+    # against pangolin_psi_* — comparing P-tuned-probe outputs against PSI
+    # mixes activations from two different fine-tunes.
+    probe_per_tissue_psi = (
+        result.probe_per_tissue_psi.detach().cpu().numpy()
+        if result.probe_per_tissue_psi is not None else None
     )
 
     # SpliceAI (per-position acceptor / donor; may be shorter than L)
@@ -312,6 +338,21 @@ def score_gene(runner, fasta, chrom, gene_id, site_set, chrom_sites,
         sai_don = np.full(L, np.nan, dtype=np.float32)
 
     # Labels — vectorise lookup from chrom_sites
+    #
+    # KNOWN BUG (corrected downstream, not here): this loops over `site_set`,
+    # i.e. only THIS gene's own splice sites. When this gene's scored region
+    # overlaps a neighbouring/overlapping gene, that other gene's real splice
+    # sites fall inside the region but are absent from `site_set`, so they are
+    # emitted as label 0 ("none") despite being genuine sites with identical
+    # sequence/score. This produces contradictory rows (same genomic pos
+    # labelled donor by one gene and none by another) that show up as the
+    # strongest "false positives" in PR curves. The correct behaviour is the
+    # one train_probes.py uses: label every position in the region from the
+    # chromosome-wide `chrom_sites` map (see train_probes.py tile_windows,
+    # which pulls positives from the chrom-wide sorted site list and excludes
+    # them from the negative pool). We do NOT fix it here to avoid an expensive
+    # re-score; paper_figures.ipynb's load_bench_arrays corrects the labels in
+    # place via a groupby-max on (chrom, pos).
     label = np.zeros(L, dtype=np.int8)
     abs_positions = np.arange(region_start, region_start + L)
     # site_set inside region:
@@ -334,17 +375,25 @@ def score_gene(runner, fasta, chrom, gene_id, site_set, chrom_sites,
     }
     for i, t in enumerate(tissues):
         out[f"pangolin_p_{t}"] = pangolin_p[i].astype(np.float16)
-        out[f"pangolin_psi_{t}"] = pangolin_psi[i].astype(np.float16)
+        if pangolin_psi is not None:
+            out[f"pangolin_psi_{t}"] = pangolin_psi[i].astype(np.float16)
     if probe_per_tissue is not None:
         # probe_per_tissue: (3, n_tissues, L) — channel order none/acc/don
         for i, t in enumerate(tissues):
             out[f"probe_none_{t}"] = probe_per_tissue[0, i].astype(np.float16)
             out[f"probe_acc_{t}"] = probe_per_tissue[1, i].astype(np.float16)
             out[f"probe_don_{t}"] = probe_per_tissue[2, i].astype(np.float16)
+    if probe_per_tissue_psi is not None:
+        # Probe outputs from probes attached to the PSI-tuned Pangolin models.
+        for i, t in enumerate(tissues):
+            out[f"probe_none_psi_{t}"] = probe_per_tissue_psi[0, i].astype(np.float16)
+            out[f"probe_acc_psi_{t}"]  = probe_per_tissue_psi[1, i].astype(np.float16)
+            out[f"probe_don_psi_{t}"]  = probe_per_tissue_psi[2, i].astype(np.float16)
     return out
 
 
-def _arrow_schema(tissues, per_tissue_probes=False):
+def _arrow_schema(tissues, per_tissue_probes=False, include_psi=True,
+                  per_tissue_probes_psi=False):
     fields = [
         ("chrom", pa.string()),
         ("gene_id", pa.string()),
@@ -356,7 +405,8 @@ def _arrow_schema(tissues, per_tissue_probes=False):
     ]
     for t in tissues:
         fields.append((f"pangolin_p_{t}", pa.float16()))
-        fields.append((f"pangolin_psi_{t}", pa.float16()))
+        if include_psi:
+            fields.append((f"pangolin_psi_{t}", pa.float16()))
     fields += [
         ("spliceai_acc", pa.float16()),
         ("spliceai_don", pa.float16()),
@@ -366,6 +416,11 @@ def _arrow_schema(tissues, per_tissue_probes=False):
             fields.append((f"probe_none_{t}", pa.float16()))
             fields.append((f"probe_acc_{t}", pa.float16()))
             fields.append((f"probe_don_{t}", pa.float16()))
+    if per_tissue_probes_psi:
+        for t in tissues:
+            fields.append((f"probe_none_psi_{t}", pa.float16()))
+            fields.append((f"probe_acc_psi_{t}",  pa.float16()))
+            fields.append((f"probe_don_psi_{t}",  pa.float16()))
     return pa.schema(fields)
 
 
@@ -411,8 +466,10 @@ def main():
     ap.add_argument("--chroms", nargs="+", default=["chr1", "chr9"])
     ap.add_argument("--device", default="auto",
                     help="auto | cuda | mps | cpu (default: auto)")
-    ap.add_argument("--probe-dir", default=None,
-                    help="Override probe directory (default: shipped probes)")
+    ap.add_argument("--probe-dir",
+                    default=str(_REPO_ROOT / "src" / "bipangolin" / "data" / "probes"),
+                    help="Probe directory (default: <repo>/src/bipangolin/data/probes — "
+                         "the freshly-trained probes in this checkout, NOT the pip-installed copy).")
     ap.add_argument("--pangolin-model-dir", default=None,
                     help="Override Pangolin weights directory")
     ap.add_argument("--skip-spliceai", action="store_true",
@@ -427,6 +484,12 @@ def main():
                     help="Also store per-tissue probe outputs (averaged across "
                          "the 3 folds for each tissue), in addition to the "
                          "global ensemble probe. Adds 12 columns to the parquet.")
+    ap.add_argument("--use-psi-models", action="store_true",
+                    help="Load Pangolin's PSI-tuned weight files (final.*.[1357].3.v2) "
+                         "and read PSI from those. Without this flag, pangolin_psi_* "
+                         "columns are NOT written, because reading PSI from P-tuned "
+                         "models gives a misleading side-output. Costs ~2x Pangolin "
+                         "inference time.")
     args = ap.parse_args()
 
     # Resolve device
@@ -443,7 +506,8 @@ def main():
 
     # Load biPangolin once
     print(f"loading biPangolin (all_tissues, correction_k=1.0, "
-          f"per_tissue_probes={args.per_tissue_probes})...")
+          f"per_tissue_probes={args.per_tissue_probes}, "
+          f"use_psi_models={args.use_psi_models})...")
     runner = BiPangolinRunner(
         pangolin_model_dir=args.pangolin_model_dir,
         probe_dir=args.probe_dir,
@@ -451,6 +515,7 @@ def main():
         tissue="all_tissues",
         correction_k=1.0,
         per_tissue_probes=args.per_tissue_probes,
+        use_psi_models=args.use_psi_models,
     )
 
     print(f"parsing GTF for {args.chroms}...")
@@ -458,7 +523,16 @@ def main():
 
     fasta = pyfastx.Fasta(args.fasta)
 
-    schema = _arrow_schema(list(TISSUE_NAMES), per_tissue_probes=args.per_tissue_probes)
+    # PSI-side per-tissue probe columns are written when BOTH flags are on
+    # AND the user has trained probes for the PSI-tuned Pangolin models.
+    per_tissue_probes_psi = (args.per_tissue_probes and args.use_psi_models
+                             and getattr(runner, "_psi_has_probes", False))
+    schema = _arrow_schema(list(TISSUE_NAMES),
+                           per_tissue_probes=args.per_tissue_probes,
+                           include_psi=args.use_psi_models,
+                           per_tissue_probes_psi=per_tissue_probes_psi)
+    if per_tissue_probes_psi:
+        print("biPangolin: PSI-side per-tissue probe columns will be written.")
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
