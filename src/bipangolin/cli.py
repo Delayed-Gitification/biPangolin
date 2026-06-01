@@ -126,10 +126,13 @@ def main(argv=None):
             seq = args.input
             chrom = "seq"
 
-        if len(seq) <= USABLE_LEN:
-            result = runner.score_sequence(seq)
-        else:
-            result = runner.score_long_sequence(seq)
+        try:
+            if len(seq) <= USABLE_LEN:
+                result = runner.score_sequence(seq)
+            else:
+                result = runner.score_long_sequence(seq)
+        except ValueError as e:
+            sys.exit(f"error: {e}")
         _print_summary(result, top_k=args.top)
         if args.out:
             _write_bedgraph(result, args.out, chrom=chrom, start=0)
@@ -137,7 +140,10 @@ def main(argv=None):
             _write_four_track_per_tissue_matrix(result, args.four_track_per_tissue_out)
 
     elif args.cmd == "score-region":
-        result = runner.score_region(args.fasta, args.chrom, args.start, args.end)
+        try:
+            result = runner.score_region(args.fasta, args.chrom, args.start, args.end)
+        except ValueError as e:
+            sys.exit(f"error: {e}")
         _print_summary(result, top_k=args.top)
         if args.out:
             _write_bedgraph(result, args.out, chrom=args.chrom, start=args.start)

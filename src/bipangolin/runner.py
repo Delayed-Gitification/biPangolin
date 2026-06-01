@@ -53,6 +53,7 @@ NONE_CLASS, ACC_CLASS, DON_CLASS = 0, 1, 2
 
 # One-hot encoding
 _BASE_TO_IDX = {b: i for i, b in enumerate("NACGT")}
+_ALLOWED_BASES = frozenset("NACGT")
 _IN_MAP = torch.tensor([
     [0, 0, 0, 0],   # N
     [1, 0, 0, 0],   # A
@@ -63,8 +64,26 @@ _IN_MAP = torch.tensor([
 
 
 def one_hot_encode(seq: str) -> torch.Tensor:
-    seq = seq.upper()
-    idx = torch.tensor([_BASE_TO_IDX.get(b, 0) for b in seq], dtype=torch.long)
+    """One-hot encode a DNA sequence to a (4, L) float tensor.
+
+    Accepts RNA: U is treated as T. Case-insensitive. N encodes to all-zeros.
+    Raises ValueError on any other character (IUPAC ambiguity codes,
+    whitespace, gaps, digits, ...) rather than silently coercing it to N,
+    which would corrupt predictions without warning.
+    """
+    seq = seq.upper().replace("U", "T")  # accept RNA input; U -> T
+    unexpected = set(seq) - _ALLOWED_BASES
+    if unexpected:
+        examples = ", ".join(
+            f"{ch!r} (first at index {seq.index(ch)})" for ch in sorted(unexpected)
+        )
+        raise ValueError(
+            f"one_hot_encode received unexpected base(s): {examples}. "
+            "Allowed input is A, C, G, T, U (U is read as T) and N. Check the "
+            "sequence for non-DNA characters such as IUPAC ambiguity codes, "
+            "whitespace, gaps ('-'), or digits."
+        )
+    idx = torch.tensor([_BASE_TO_IDX[b] for b in seq], dtype=torch.long)
     return _IN_MAP[idx].T.contiguous()
 
 
@@ -279,6 +298,11 @@ class BiPangolinRunner:
         self.per_tissue_probes = per_tissue_probes
         self.use_psi_models = use_psi_models
         self._pair_specs = []
+        # Lazily-built caches of loaded (model, probe, handles, cfg, tissue_idx)
+        # tuples. Populated on first scoring call and reused for the runner's
+        # lifetime so we don't reload weights from disk on every sequence.
+        self._pair_cache = None
+        self._psi_cache = None
         # PSI-tuned model specs: (pangolin_path, probe_path_or_None, tissue_idx).
         # probe_path is populated only when the user has trained probes for the
         # PSI-tuned models (probes for model_nums 1,3,5,7); otherwise None and
@@ -396,25 +420,29 @@ class BiPangolinRunner:
         corrected[NONE_CLASS] *= self.correction_k
         return corrected / corrected.sum(dim=0, keepdim=True).clamp_min(1e-12)
 
-    def _iter_pairs(self):
+    def _build_pair_cache(self):
+        cache = []
         for pangolin_path, probe_path, tissue_idx in self._pair_specs:
             pangolin_model = load_frozen_pangolin(pangolin_path, self.device)
             probe, cfg = load_probe(probe_path, self.device)
-
             layers = parse_probe_layers(cfg["probe_layer"])
             handles = attach_hooks(pangolin_model, layers)
+            cache.append((pangolin_model, probe, handles, cfg, tissue_idx))
+        return cache
 
-            try:
-                yield pangolin_model, probe, handles, cfg, tissue_idx
-            finally:
-                del pangolin_model, probe
-                if self.device.type == "cuda":
-                    torch.cuda.empty_cache()
+    def _iter_pairs(self):
+        # Models + probes are loaded from disk once and cached on the runner for
+        # its lifetime. Previously this reloaded every weight file (and moved it
+        # to the device) on *every* score_sequence() call — and the VCF path
+        # calls score_sequence twice per variant — which dominated runtime at
+        # scale. Hooks are attached exactly once when the cache is built;
+        # re-attaching per call against a persistent model would stack them.
+        if self._pair_cache is None:
+            self._pair_cache = self._build_pair_cache()
+        yield from self._pair_cache
 
-    def _iter_psi_models(self):
-        """Yield (pangolin_model, probe_or_None, handles_or_None, cfg_or_None, tissue_idx)
-        for the PSI-tuned Pangolin files. probe/handles/cfg are None when no
-        PSI-side probe was found. Only populated if `use_psi_models=True`."""
+    def _build_psi_cache(self):
+        cache = []
         for pangolin_path, probe_path, tissue_idx in self._psi_specs:
             pangolin_model = load_frozen_pangolin(pangolin_path, self.device)
             probe = None
@@ -424,14 +452,18 @@ class BiPangolinRunner:
                 probe, cfg = load_probe(probe_path, self.device)
                 layers = parse_probe_layers(cfg["probe_layer"])
                 handles = attach_hooks(pangolin_model, layers)
-            try:
-                yield pangolin_model, probe, handles, cfg, tissue_idx
-            finally:
-                del pangolin_model
-                if probe is not None:
-                    del probe
-                if self.device.type == "cuda":
-                    torch.cuda.empty_cache()
+            cache.append((pangolin_model, probe, handles, cfg, tissue_idx))
+        return cache
+
+    def _iter_psi_models(self):
+        """Yield (pangolin_model, probe_or_None, handles_or_None, cfg_or_None, tissue_idx)
+        for the PSI-tuned Pangolin files. probe/handles/cfg are None when no
+        PSI-side probe was found. Only populated if `use_psi_models=True`.
+        Like `_iter_pairs`, models are loaded once and cached for the runner's
+        lifetime."""
+        if self._psi_cache is None:
+            self._psi_cache = self._build_psi_cache()
+        yield from self._psi_cache
 
     @torch.no_grad()
     def _forward_one(self, pangolin_model, probe, handles, cfg, seq_tensor):

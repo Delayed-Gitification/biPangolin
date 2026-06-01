@@ -135,21 +135,42 @@ def resolve_pangolin_weights(cache_dir: Optional[Path] = None,
         _download(PANGOLIN_WEIGHTS_URL, archive)
     _verify_sha256(archive, PANGOLIN_WEIGHTS_SHA256)
 
-    # Extract.
-    print(f"biPangolin: extracting weights to {weights_dir}", file=sys.stderr)
-    weights_dir.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(archive) as tf:
-        tf.extractall(weights_dir, filter="data")
-    _flatten_singleton_subdir(weights_dir)
+    # Extract, then sanity-check the file count. If extraction yields too few
+    # files the archive itself is stale/incomplete (e.g. a cached copy of an
+    # older 12-file release). Re-download it ONCE and re-extract before giving
+    # up, so the cache self-heals instead of trapping the user in a permanent
+    # "re-extracting -> still too few -> error" loop.
+    def _extract() -> int:
+        if weights_dir.exists():
+            shutil.rmtree(weights_dir)
+        print(f"biPangolin: extracting weights to {weights_dir}", file=sys.stderr)
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(archive) as tf:
+            tf.extractall(weights_dir, filter="data")
+        _flatten_singleton_subdir(weights_dir)
+        return _count_v2_files(weights_dir)
+
+    n = _extract()
+    if n < PANGOLIN_EXPECTED_FILES:
+        print(
+            f"biPangolin: cached archive {archive.name} yielded {n} .v2 files, "
+            f"expected {PANGOLIN_EXPECTED_FILES} — it is stale/incomplete. "
+            f"Re-downloading once.",
+            file=sys.stderr,
+        )
+        archive.unlink(missing_ok=True)
+        _download(PANGOLIN_WEIGHTS_URL, archive)
+        _verify_sha256(archive, PANGOLIN_WEIGHTS_SHA256)
+        n = _extract()
 
     # Final sanity check.
-    n = _count_v2_files(weights_dir)
     if n < PANGOLIN_EXPECTED_FILES:
         raise RuntimeError(
             f"Extracted {n} .v2 files from {archive.name} into {weights_dir}, "
-            f"expected at least {PANGOLIN_EXPECTED_FILES}. The tarball appears "
-            f"incomplete. Try `rm -rf {cache_dir}` and re-running, or update "
-            f"PANGOLIN_WEIGHTS_URL in {__file__} to point at a complete release."
+            f"expected at least {PANGOLIN_EXPECTED_FILES}. The freshly downloaded "
+            f"tarball is incomplete. Try `rm -rf {cache_dir}` and re-running, or "
+            f"update PANGOLIN_WEIGHTS_URL in {__file__} to point at a complete "
+            f"release (the configured URL is {PANGOLIN_WEIGHTS_URL})."
         )
     return weights_dir
 
