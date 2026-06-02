@@ -14,6 +14,7 @@ Usage (quick test in terminal):
     python runner.py /path/to/models /path/to/probes
 """
 from dataclasses import dataclass, field
+from typing import NamedTuple
 import json
 from pathlib import Path
 import re
@@ -185,6 +186,15 @@ def attach_hooks(model, probe_layers):
 # Result Container
 # ---------------------------------------------------------------------------
 
+class RoutedPair(NamedTuple):
+    """A routed Pangolin metric for one tissue (or the all-tissue average):
+    two (L,) tracks where the value is Pangolin's score and the column is the
+    probe-chosen splice identity. Access as `.acceptor` / `.donor`, or unpack
+    `acc, don = result.brain_P`."""
+    acceptor: torch.Tensor
+    donor: torch.Tensor
+
+
 @dataclass
 class BiPangolinResult:
     pangolin_prob: torch.Tensor
@@ -217,6 +227,68 @@ class BiPangolinResult:
 
     def __len__(self):
         return self.probe_none.shape[0]
+
+    def __getattr__(self, name):
+        """Friendly per-tissue accessors for the routed Pangolin tracks:
+
+            result.brain_P                  # RoutedPair(acceptor, donor) for brain
+            result.brain_PSI                # same, PSI metric (needs PSI models)
+            result.all_tissue_average_P     # mean over tissues (needs all tissues)
+            result.all_tissue_average_PSI
+
+        Each returns a `RoutedPair` of two (L,) tracks. Asking for something
+        that was not computed raises a descriptive error telling you how to get
+        it. Only reached when normal attribute lookup fails, so the real
+        dataclass fields (pangolin_prob, probe_acceptor, ...) are untouched.
+        """
+        # Never intercept dunder / private lookups (pickle, copy, etc.).
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        if name.endswith("_PSI"):
+            tissue, metric = name[:-4], "PSI"
+        elif name.endswith("_P"):
+            tissue, metric = name[:-2], "P"
+        else:
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute {name!r}")
+
+        if metric == "P":
+            assert not self.metadata.get("psi_only"), (
+                f"`{name}` is unavailable: this result was produced in "
+                "psi-only mode, so the P-tuned models were never run. Re-run "
+                "with `--psi` (CLI) or use_psi_models=True instead of "
+                "psi_only=True to get P tracks alongside PSI."
+            )
+        else:  # PSI
+            assert self.pangolin_psi is not None, (
+                f"`{name}` is unavailable: PSI was not computed. Build the "
+                "runner with use_psi_models=True (Python) or pass `--psi` / "
+                "`--psi-only` (CLI), then re-score."
+            )
+
+        prob_routed, psi_routed = self.routed_tracks()
+        routed = prob_routed if metric == "P" else psi_routed  # (2, n_tissues, L)
+
+        if tissue == "all_tissue_average":
+            assert len(self.tissues) == len(TISSUE_NAMES), (
+                f"`{name}` needs all {len(TISSUE_NAMES)} tissues "
+                f"{TISSUE_NAMES}, but this result only has {tuple(self.tissues)}. "
+                "Build the runner with tissue='all_tissues' (the default) to "
+                "average across every tissue."
+            )
+            pair = routed.mean(dim=1)  # (2, L)
+        else:
+            assert tissue in self.tissues, (
+                f"Tissue {tissue!r} is not in this result. Available tissues: "
+                f"{tuple(self.tissues)}. (Use one of those, or "
+                "'all_tissue_average'.) If you wanted a tissue not listed, "
+                "build the runner with that tissue (or tissue='all_tissues')."
+            )
+            ti = self.tissues.index(tissue)
+            pair = routed[:, ti, :]  # (2, L)
+
+        return RoutedPair(acceptor=pair[0], donor=pair[1])
 
     @property
     def raw(self):

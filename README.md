@@ -25,17 +25,28 @@ bipangolin score-region hg38.fa chr19 13200000 13300000 --out region
 bipangolin score-vcf    input.vcf output.vcf --fasta hg38.fa   # → annotated VCF
 ```
 
-**As a Python library** — get a result object and the routed donor/acceptor
-tracks:
+**As a Python library** — get a result object and read the routed donor/acceptor
+tracks by name:
 
 ```python
 from bipangolin import BiPangolinRunner
 
-runner = BiPangolinRunner()
+runner = BiPangolinRunner()                  # all tissues
 result = runner.score_sequence("ACGT" * 500)
 
-acceptor, donor = result.routed_tracks()[0]   # (n_tissues, L) each
+acceptor, donor = result.brain_P             # two (L,) tracks for brain
+avg_acc, avg_don = result.all_tissue_average_P   # mean over all tissues
 ```
+
+Each `result.<tissue>_P` (and `_PSI`, if you ran PSI models) returns a
+`RoutedPair` you can unpack or access as `.acceptor` / `.donor`. Valid tissues
+are `heart`, `liver`, `brain`, `testis`, plus `all_tissue_average` (only when
+all four tissues were run). Asking for something that wasn't computed — PSI when
+you didn't load the PSI models, or a tissue you didn't score — raises a clear
+error telling you how to enable it.
+
+If you'd rather work with the full array, `result.routed_tracks()` returns the
+routed tracks with shape `(2, n_tissues, L)` (channel 0 acceptor, 1 donor).
 
 **Common modes** (mix and match on any scoring command):
 
@@ -90,12 +101,10 @@ bipangolin score-seq sequence.fa --out predictions
 ```python
 from bipangolin import BiPangolinRunner
 
-runner = BiPangolinRunner()                 # auto-downloads weights
+runner = BiPangolinRunner(tissue="brain")   # auto-downloads weights; one tissue
 result = runner.score_sequence("ACGT" * 500)
 
-prob_routed, _ = result.routed_tracks()     # (2, n_tissues, L); ch0 acceptor, ch1 donor
-acceptor_track = prob_routed[0]             # (n_tissues, L)
-donor_track    = prob_routed[1]
+acceptor, donor = result.brain_P            # two (L,) tracks for brain
 ```
 
 Long sequences are handled transparently — call `runner.score_long_sequence`,
@@ -223,6 +232,18 @@ Valid tissues: `heart`, `liver`, `brain`, `testis`.
 ---
 
 ## The result object
+
+The friendly accessors are the easiest entry point:
+
+```python
+result = runner.score_sequence(seq)
+
+acceptor, donor = result.brain_P            # RoutedPair of two (L,) tracks
+result.liver_PSI                            # RoutedPair (needs PSI models)
+result.all_tissue_average_P                 # mean over all tissues
+```
+
+The full set of attributes:
 
 ```python
 result = runner.score_sequence(seq)
