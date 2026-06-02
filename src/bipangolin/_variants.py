@@ -262,11 +262,7 @@ def score_vcf(runner, vcf_in: Union[str, Path], vcf_out: Union[str, Path],
 
     Returns number of variants scored.
     """
-    try:
-        import pyfastx
-    except ImportError as e:
-        raise ImportError("score_vcf requires pyfastx: pip install pyfastx") from e
-
+    import pyfastx
     fasta = pyfastx.Fasta(str(fasta_path))
     vcf_in = Path(vcf_in)
     vcf_out = Path(vcf_out)

@@ -888,11 +888,7 @@ class BiPangolinRunner:
 
     @torch.no_grad()
     def score_region(self, fasta_path, chrom, start, end, psi_only=False):
-        try:
-            import pyfastx
-        except ImportError as e:
-            raise ImportError("score_region requires pyfastx: pip install pyfastx") from e
-
+        import pyfastx
         fasta = pyfastx.Fasta(str(fasta_path))
         if chrom not in fasta:
             raise KeyError(f"Chromosome {chrom!r} not in FASTA")
@@ -913,11 +909,7 @@ class BiPangolinRunner:
         return result
 
     def score_variant(self, fasta_path, chrom, pos, ref, alt, distance=50):
-        try:
-            import pyfastx
-        except ImportError as e:
-            raise ImportError("score_variant requires pyfastx: pip install pyfastx") from e
-
+        import pyfastx
         from ._variants import score_variant as _score_variant
         fasta = pyfastx.Fasta(str(fasta_path))
         return _score_variant(self, fasta, chrom, pos, ref, alt, distance=distance)

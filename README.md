@@ -310,11 +310,20 @@ ALT|DS_AG|DS_AL|DS_DG|DS_DL|DP_AG|DP_AL|DP_DG|DP_DL[|TISSUE:DS_GAIN:DS_LOSS:DP_G
 | `DS_AG` / `DS_AL` | delta score for **a**cceptor **g**ain / **l**oss (probe-based, tissue-agnostic) |
 | `DS_DG` / `DS_DL` | delta score for **d**onor **g**ain / **l**oss |
 | `DP_AG` / `DP_AL` / `DP_DG` / `DP_DL` | position (relative to the variant, in nt) of each of those max deltas |
-| `TISSUE:...` | per-tissue Pangolin P(spliced) gain/loss deltas and their positions; one block per tissue (or just the `--tissue` you chose) |
+| `TISSUE:...` | per-tissue Pangolin P(spliced) gain/loss deltas and their positions |
 
 Delta scores are formatted to 3 decimals; positions are signed integers
 (negative = upstream of the variant). With multiple ALT alleles the INFO value
 holds a comma-separated list, one annotation per allele.
+
+**How many tissue blocks?** The `DS_*` / `DP_*` core fields are always
+tissue-agnostic (probe-based) and appear once. The trailing `TISSUE:...` blocks
+are *one per tissue actually loaded* — so `--tissue all_tissues` (the default)
+appends **four** blocks (`heart`, `liver`, `brain`, `testis`), while
+`--tissue brain` appends a single `brain:` block. biPangolin does **not** emit
+an averaged tissue block; if you want one tissue in the VCF, pass `--tissue`.
+Restricting the tissue is the way to keep the INFO field short for downstream
+parsers.
 
 ### bedGraph output layout
 
