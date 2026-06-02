@@ -39,9 +39,9 @@ dev = ["pytest>=7", "pyfastx>=2.0"]
 bipangolin = "bipangolin.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/USERNAME/bipangolin"
-Repository = "https://github.com/USERNAME/bipangolin"
-Issues = "https://github.com/USERNAME/bipangolin/issues"
+Homepage = "https://github.com/Delayed-Gitification/biPangolin"
+Repository = "https://github.com/Delayed-Gitification/biPangolin"
+Issues = "https://github.com/Delayed-Gitification/biPangolin/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bipangolin"]

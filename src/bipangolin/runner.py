@@ -230,44 +230,6 @@ class BiPangolinResult:
         ]
         return torch.cat(parts, dim=0)
 
-    def four_track_per_tissue(self, double_val_floor=0.01, double_val_ratio=0.1):
-        """Return a 4 x n_tissues x L tissue-specific donor/acceptor matrix.
-
-        Channel order is:
-            0: donor PSI
-            1: donor P(spliced)
-            2: acceptor PSI
-            3: acceptor P(spliced)
-
-        Pangolin values are routed into donor/acceptor channels using exactly
-        the same rule as `routed_tracks` / `_routing_masks` (argmax of the
-        corrected acceptor/donor probe probs, with a floor+ratio "both" rule).
-        Routing is identical across every output mode; the only difference here
-        is the 4-channel (PSI, P) x (donor, acceptor) layout. A "both" position
-        therefore lights up donor AND acceptor channels.
-        """
-        if self.pangolin_psi is None:
-            raise RuntimeError(
-                "four_track_per_tissue() needs pangolin_psi but it is None. "
-                "Re-run with BiPangolinRunner(use_psi_models=True) to load the "
-                "PSI-tuned weight files."
-            )
-        acc_col_mask, don_col_mask = self._routing_masks(
-            double_val_floor=double_val_floor, double_val_ratio=double_val_ratio)
-
-        out = torch.zeros(
-            4,
-            self.pangolin_prob.shape[0],
-            self.pangolin_prob.shape[1],
-            dtype=self.pangolin_prob.dtype,
-            device=self.pangolin_prob.device,
-        )
-        out[0, :, don_col_mask] = self.pangolin_psi[:, don_col_mask]
-        out[1, :, don_col_mask] = self.pangolin_prob[:, don_col_mask]
-        out[2, :, acc_col_mask] = self.pangolin_psi[:, acc_col_mask]
-        out[3, :, acc_col_mask] = self.pangolin_prob[:, acc_col_mask]
-        return out
-
     def _routing_masks(self, double_val_floor=0.01, double_val_ratio=0.1):
         """Decide, per position, which of {acceptor, donor} column(s) get the
         Pangolin value. Returns (acc_col_mask, don_col_mask), each a boolean
@@ -349,7 +311,7 @@ def _mps_is_healthy() -> bool:
 
     PyTorch's Metal (Apple Silicon) backend has historically mis-handled
     high-dilation 1D convolutions (Pangolin uses atrous rates up to 25) and
-    boolean-mask indexing (used in four_track_per_tissue) — sometimes returning
+    boolean-mask indexing (used when routing tracks) — sometimes returning
     NaNs or raising deep in the forward pass. We run a tiny representative
     computation and confirm the result is finite before trusting MPS.
     """

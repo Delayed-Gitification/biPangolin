@@ -5,7 +5,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
 import torch
 
 from .runner import (
@@ -82,17 +81,6 @@ def _write_routed_bedgraph(result: BiPangolinResult, prefix: str,
         _write_one_bg(f"{prefix}.probe.donor.bg", result.probe_donor, chrom, start)
 
 
-def _write_four_track_per_tissue_matrix(result: BiPangolinResult, path: str,
-                                        double_val_floor: float = 0.01,
-                                        double_val_ratio: float = 0.1) -> None:
-    """Write 4 x n_tissues x L matrix as .npy (same routing as the bedGraphs)."""
-    matrix = result.four_track_per_tissue(
-        double_val_floor=double_val_floor,
-        double_val_ratio=double_val_ratio).detach().cpu().numpy()
-    np.save(path, matrix)
-    print(f"wrote {path} shape={matrix.shape}", file=sys.stderr)
-
-
 def _add_scoring_args(p) -> None:
     """Shared output/routing args for score-seq and score-region."""
     p.add_argument("--models", default=None)
@@ -118,9 +106,6 @@ def _add_scoring_args(p) -> None:
     p.add_argument("--double-val-ratio", type=float, default=0.1,
                    help="Min min/max ratio of acceptor vs donor probe prob for "
                         "the 'both columns' rule (default 0.1)")
-    p.add_argument("--four-track-per-tissue-out", default=None,
-                   help="Write 4 x n_tissues x L donor/acceptor-routed Pangolin "
-                        "matrix as .npy (same routing as the bedGraphs; implies --psi)")
     p.add_argument("--n-models-per-tissue", type=int, default=3, choices=(1, 2, 3),
                    help="Folds per tissue to ensemble: 3 (default, full), or "
                         "2 / 1 for faster, lower-robustness scoring")
@@ -197,14 +182,8 @@ def _run_scoring(args):
     if args.psi and args.psi_only:
         sys.exit("error: --psi and --psi-only are mutually exclusive")
 
-    if args.psi_only and args.four_track_per_tissue_out:
-        print("biPangolin: WARNING — --four-track-per-tissue-out with --psi-only: "
-              "the P channels (1, 3) of the matrix will be all-zero (the P-tuned "
-              "models are not run in psi-only mode); only the PSI channels (0, 2) "
-              "are meaningful.", file=sys.stderr)
-
-    # PSI models are needed for --psi, --psi-only, and the four-track matrix.
-    use_psi = bool(args.psi or args.psi_only or args.four_track_per_tissue_out)
+    # PSI models are needed for --psi and --psi-only.
+    use_psi = bool(args.psi or args.psi_only)
     runner = BiPangolinRunner(args.models, args.probes, tissue=args.tissue,
                               use_psi_models=use_psi,
                               n_models_per_tissue=args.n_models_per_tissue)
@@ -251,11 +230,6 @@ def _run_scoring(args):
             write_psi=bool(args.psi or args.psi_only),
             raw_probes=args.raw_probes,
         )
-    if args.four_track_per_tissue_out:
-        _write_four_track_per_tissue_matrix(
-            result, args.four_track_per_tissue_out,
-            double_val_floor=args.double_val_floor,
-            double_val_ratio=args.double_val_ratio)
 
 
 if __name__ == "__main__":
