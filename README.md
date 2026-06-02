@@ -341,6 +341,22 @@ with `use_psi_models=True`, the library equivalent of `--psi`.
 4. **Routing.** Pangolin's tissue-specific scores are routed into acceptor and
    donor tracks using the probe identity.
 
+### Models and probes loaded
+
+Pangolin is a single multi-output network, but the released weights ship as
+**three independently fine-tuned versions of each output** (an ensemble of
+folds). biPangolin uses those folds directly: with the default full ensemble it
+loads up to **24 models** during inference — three folds for each of the four
+tissues' P-tuned outputs (12), plus, when `use_psi_models=True` / `--psi`, three
+folds for each tissue's PSI-tuned output (another 12). Each loaded model carries
+its **own bespoke probe**, trained on that specific model's internal
+activations, and the per-position `none`/`acceptor`/`donor` predictions are
+averaged across folds per tissue.
+
+This is why `--n-models-per-tissue` / `n_models_per_tissue` (1, 2, or 3) trades
+robustness for speed: it sets how many of the three folds per output are
+loaded and ensembled, scaling that 24 down to as few as 8.
+
 ---
 
 ## Citation & license
