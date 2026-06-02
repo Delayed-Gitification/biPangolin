@@ -68,15 +68,41 @@ cd biPangolin
 pip install -e .
 ```
 
-For FASTA / genomic-region / VCF workflows, add the FASTA extra:
+This pulls in everything needed, including FASTA reading (`pyfastx`) for the
+genomic-region and VCF workflows. Scoring runs on GPU, Apple Silicon, or CPU,
+selected automatically.
+
+### Model weights and caching
+
+The biPangolin probe weights ship inside the package, but the Pangolin model
+weights (~60 MB) are too large to bundle, so on first use biPangolin downloads
+and extracts them to a local cache. Subsequent runs reuse that cache.
+
+By default the cache lives in the OS cache directory:
+
+| OS | Default location |
+|----|------------------|
+| Linux | `$XDG_CACHE_HOME/bipangolin` (usually `~/.cache/bipangolin`) |
+| macOS | `~/Library/Caches/bipangolin` |
+| Windows | `%LOCALAPPDATA%\bipangolin\Cache` |
+
+On HPC nodes with small home-directory quotas, or air-gapped compute nodes,
+this matters:
 
 ```bash
-pip install -e ".[fasta]"
+# Redirect the cache to scratch / a shared project space.
+export BIPANGOLIN_CACHE=/scratch/$USER/bipangolin
+
+# Pre-download weights on a login node, then run offline. Either populate the
+# cache above and copy it to the compute node, or point the CLI/runner straight
+# at an unpacked weights directory:
+bipangolin score-seq seq.fa --models /shared/pangolin_models --probes /shared/probes
 ```
 
-On first use biPangolin downloads the Pangolin model weights to a local cache.
-The biPangolin probe weights ship with the package, so nothing else is required.
-Scoring runs on GPU, Apple Silicon, or CPU, selected automatically.
+`--models` / `--probes` (CLI) and `pangolin_model_dir` / `probe_dir`
+(`BiPangolinRunner`) bypass the download entirely — useful when the compute node
+has no internet access. Other env vars: `BIPANGOLIN_FORCE_REFRESH=1` forces a
+fresh download.
 
 ---
 
@@ -146,6 +172,14 @@ runner = BiPangolinRunner(device="cpu")       # or "cuda", "mps"
 # Lower the per-tile input length if a machine runs out of memory.
 runner = BiPangolinRunner(window_len=20000)   # default 50000
 ```
+
+`window_len` is the per-tile input length; longer sequences are split into tiles
+of this size, so it caps peak memory regardless of how long the input is. The
+default `50000` is comfortable on a GPU or a modern 16 GB+ machine. On
+memory-constrained CPU nodes, dropping to `10000`–`20000` cuts the peak roughly
+in proportion at the cost of more (cheap) forward passes. It must stay above
+`2 × 5000` (the model's receptive-field crop); below that no usable output
+remains.
 
 Once built, a runner can score as many sequences as you like:
 
@@ -240,6 +274,8 @@ bipangolin score-region <fasta> <chrom> <start> <end> [options]
 | `--double-val-ratio` | `0.1` | min/max ratio for the "both columns" rule |
 | `--n-models-per-tissue` | `3` | Folds per tissue to ensemble: `3` (full), or `2` / `1` for faster scoring |
 | `--top` | `10` | Number of top sites to print |
+| `--models DIR` | *(auto-download)* | Use Pangolin weights from this directory instead of the cache (offline use) |
+| `--probes DIR` | *(bundled)* | Use probe weights from this directory instead of the ones shipped with the package |
 
 `--psi` and `--psi-only` are mutually exclusive.
 
@@ -257,7 +293,28 @@ bipangolin score-vcf <in.vcf[.gz]> <out.vcf> --fasta <ref.fa> [options]
 | `--n-models-per-tissue` | `3` | Fewer folds per tissue for faster scoring |
 | `--no-progress` | off | Disable the progress bar |
 
-Each ALT allele is annotated with a `biPangolin=` INFO field.
+(`score-vcf` also accepts `--models` / `--probes` for offline weights, as above.)
+
+#### The `biPangolin=` INFO field
+
+Each ALT allele is annotated with a `biPangolin=` INFO field, in a SpliceAI-style
+pipe-delimited format:
+
+```text
+ALT|DS_AG|DS_AL|DS_DG|DS_DL|DP_AG|DP_AL|DP_DG|DP_DL[|TISSUE:DS_GAIN:DS_LOSS:DP_GAIN:DP_LOSS ...]
+```
+
+| Field | Meaning |
+|-------|---------|
+| `ALT` | the alternate allele this annotation is for |
+| `DS_AG` / `DS_AL` | delta score for **a**cceptor **g**ain / **l**oss (probe-based, tissue-agnostic) |
+| `DS_DG` / `DS_DL` | delta score for **d**onor **g**ain / **l**oss |
+| `DP_AG` / `DP_AL` / `DP_DG` / `DP_DL` | position (relative to the variant, in nt) of each of those max deltas |
+| `TISSUE:...` | per-tissue Pangolin P(spliced) gain/loss deltas and their positions; one block per tissue (or just the `--tissue` you chose) |
+
+Delta scores are formatted to 3 decimals; positions are signed integers
+(negative = upstream of the variant). With multiple ALT alleles the INFO value
+holds a comma-separated list, one annotation per allele.
 
 ### bedGraph output layout
 

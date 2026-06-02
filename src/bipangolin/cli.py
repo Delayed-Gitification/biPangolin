@@ -190,10 +190,7 @@ def _run_scoring(args):
 
     if args.cmd == "score-seq":
         if Path(args.input).is_file():
-            try:
-                import pyfastx
-            except ImportError:
-                sys.exit("score-seq with FASTA input requires pyfastx: pip install pyfastx")
+            import pyfastx
             fa = pyfastx.Fasta(args.input)
             seqs = list(fa)
             if len(seqs) != 1:
