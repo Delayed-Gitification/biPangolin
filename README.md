@@ -45,16 +45,17 @@ run). Asking for something that wasn't computed — PSI when you didn't load the
 PSI models, or a tissue you didn't score — raises a clear error telling you how
 to enable it.
 
-**Common modes** (mix and match on any scoring command):
+**Common modes** (mix and match). Each is a CLI flag and a `BiPangolinRunner`
+argument:
 
-| You want… | Use |
-|-----------|-----|
-| Donor/acceptor probability tracks (the default) | *(nothing extra)* |
-| Splice-site usage (PSI) too | `--psi` |
-| Only usage (PSI), faster | `--psi-only` |
-| A single tissue | `--tissue brain` |
-| Faster, lower-cost scoring | `--n-models-per-tissue 1` |
-| The raw probe outputs as well | `--raw-probes` |
+| You want… | CLI flag | Runner argument |
+|-----------|----------|-----------------|
+| Donor/acceptor probability tracks (the default) | *(nothing extra)* | *(nothing extra)* |
+| Splice-site usage (PSI) too | `--psi` | `use_psi_models=True` |
+| Only usage (PSI), faster | `--psi-only` | `use_psi_models=True` + `score_sequence(seq, psi_only=True)` |
+| A single tissue | `--tissue brain` | `tissue="brain"` |
+| Faster, lower-cost scoring | `--n-models-per-tissue 1` | `n_models_per_tissue=1` |
+| The raw probe outputs as well | `--raw-probes` | *(always on the result: `result.probe_acceptor` / `result.probe_donor`)* |
 
 ---
 
