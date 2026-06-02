@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import re
+import sys
 import torch
 import torch.nn as nn
 
@@ -25,11 +26,23 @@ from ._weights import resolve_pangolin_weights, resolve_probe_weights
 
 
 # Geometry constants
+#
+# The Pangolin model internally crops PANGOLIN_CROP positions from each side of
+# its output (model.py: CL = 2*sum(AR*(W-1)) = 10000, F.pad(skip, (-CL//2, ...))).
+# That crop is exactly the model's receptive-field radius, so EVERY position the
+# model emits has its full ±PANGOLIN_CROP bp of real context — the prediction for
+# a given position is identical regardless of which window produced it. As a
+# result, long sequences can be tiled with zero overlap and no blending: each
+# tile yields (window_len - 2*PANGOLIN_CROP) usable positions that abut the next
+# tile's exactly. (The old triangular-blend overlap scheme was a no-op averaging
+# identical values.)
 PANGOLIN_CROP = 5000
-WINDOW_LEN_DEFAULT = 20000   
-WINDOW_LEN = WINDOW_LEN_DEFAULT
-USABLE_LEN = WINDOW_LEN_DEFAULT - 2 * PANGOLIN_CROP
-TILE_OVERLAP = 2000          
+# Default per-tile model input length. Larger => fewer forward passes (the fixed
+# 2*CROP overhead is amortised over more usable output) but more activation
+# memory. Configurable per-runner via BiPangolinRunner(window_len=...).
+DEFAULT_WINDOW_LEN = 50000
+WINDOW_LEN = DEFAULT_WINDOW_LEN              # module-level default (back-compat)
+USABLE_LEN = WINDOW_LEN - 2 * PANGOLIN_CROP  # usable output positions per tile
 
 # Pangolin output channel mapping
 PROB_CHANNEL_PER_TISSUE = [1, 4, 7, 10]   # P(spliced)
@@ -53,6 +66,7 @@ NONE_CLASS, ACC_CLASS, DON_CLASS = 0, 1, 2
 
 # One-hot encoding
 _BASE_TO_IDX = {b: i for i, b in enumerate("NACGT")}
+_ALLOWED_BASES = frozenset("NACGT")
 _IN_MAP = torch.tensor([
     [0, 0, 0, 0],   # N
     [1, 0, 0, 0],   # A
@@ -63,8 +77,26 @@ _IN_MAP = torch.tensor([
 
 
 def one_hot_encode(seq: str) -> torch.Tensor:
-    seq = seq.upper()
-    idx = torch.tensor([_BASE_TO_IDX.get(b, 0) for b in seq], dtype=torch.long)
+    """One-hot encode a DNA sequence to a (4, L) float tensor.
+
+    Accepts RNA: U is treated as T. Case-insensitive. N encodes to all-zeros.
+    Raises ValueError on any other character (IUPAC ambiguity codes,
+    whitespace, gaps, digits, ...) rather than silently coercing it to N,
+    which would corrupt predictions without warning.
+    """
+    seq = seq.upper().replace("U", "T")  # accept RNA input; U -> T
+    unexpected = set(seq) - _ALLOWED_BASES
+    if unexpected:
+        examples = ", ".join(
+            f"{ch!r} (first at index {seq.index(ch)})" for ch in sorted(unexpected)
+        )
+        raise ValueError(
+            f"one_hot_encode received unexpected base(s): {examples}. "
+            "Allowed input is A, C, G, T, U (U is read as T) and N. Check the "
+            "sequence for non-DNA characters such as IUPAC ambiguity codes, "
+            "whitespace, gaps ('-'), or digits."
+        )
+    idx = torch.tensor([_BASE_TO_IDX[b] for b in seq], dtype=torch.long)
     return _IN_MAP[idx].T.contiguous()
 
 
@@ -198,7 +230,7 @@ class BiPangolinResult:
         ]
         return torch.cat(parts, dim=0)
 
-    def four_track_per_tissue(self):
+    def four_track_per_tissue(self, double_val_floor=0.01, double_val_ratio=0.1):
         """Return a 4 x n_tissues x L tissue-specific donor/acceptor matrix.
 
         Channel order is:
@@ -207,14 +239,21 @@ class BiPangolinResult:
             2: acceptor PSI
             3: acceptor P(spliced)
 
-        Pangolin values are routed into donor or acceptor channels using the
-        probe's three-way argmax. Positions classified as None remain zero.
+        Pangolin values are routed into donor/acceptor channels using exactly
+        the same rule as `routed_tracks` / `_routing_masks` (argmax of the
+        corrected acceptor/donor probe probs, with a floor+ratio "both" rule).
+        Routing is identical across every output mode; the only difference here
+        is the 4-channel (PSI, P) x (donor, acceptor) layout. A "both" position
+        therefore lights up donor AND acceptor channels.
         """
-        labels = torch.stack([
-            self.probe_none,
-            self.probe_acceptor,
-            self.probe_donor,
-        ], dim=0).argmax(dim=0)
+        if self.pangolin_psi is None:
+            raise RuntimeError(
+                "four_track_per_tissue() needs pangolin_psi but it is None. "
+                "Re-run with BiPangolinRunner(use_psi_models=True) to load the "
+                "PSI-tuned weight files."
+            )
+        acc_col_mask, don_col_mask = self._routing_masks(
+            double_val_floor=double_val_floor, double_val_ratio=double_val_ratio)
 
         out = torch.zeros(
             4,
@@ -223,44 +262,146 @@ class BiPangolinResult:
             dtype=self.pangolin_prob.dtype,
             device=self.pangolin_prob.device,
         )
-        if self.pangolin_psi is None:
-            raise RuntimeError(
-                "four_track_per_tissue() needs pangolin_psi but it is None. "
-                "Re-run with BiPangolinRunner(use_psi_models=True) to load the "
-                "PSI-tuned weight files."
-            )
-        donor_mask = labels == DON_CLASS
-        acceptor_mask = labels == ACC_CLASS
-
-        out[0, :, donor_mask] = self.pangolin_psi[:, donor_mask]
-        out[1, :, donor_mask] = self.pangolin_prob[:, donor_mask]
-        out[2, :, acceptor_mask] = self.pangolin_psi[:, acceptor_mask]
-        out[3, :, acceptor_mask] = self.pangolin_prob[:, acceptor_mask]
+        out[0, :, don_col_mask] = self.pangolin_psi[:, don_col_mask]
+        out[1, :, don_col_mask] = self.pangolin_prob[:, don_col_mask]
+        out[2, :, acc_col_mask] = self.pangolin_psi[:, acc_col_mask]
+        out[3, :, acc_col_mask] = self.pangolin_prob[:, acc_col_mask]
         return out
+
+    def _routing_masks(self, double_val_floor=0.01, double_val_ratio=0.1):
+        """Decide, per position, which of {acceptor, donor} column(s) get the
+        Pangolin value. Returns (acc_col_mask, don_col_mask), each a boolean
+        (L,) tensor; a "both" position is True in both.
+
+        Routing is driven by the corrected probe acceptor/donor probabilities
+        (the `none` class is deliberately ignored — every position is routed):
+
+          * single column = argmax(acceptor, donor)               (the default)
+          * BOTH columns   when the probe is genuinely ambiguous:
+                min(acc, don) >= double_val_floor                 (floor)
+                AND  min(acc, don) / max(acc, don) >= double_val_ratio  (ratio)
+
+        The floor rejects two near-zero values (e.g. 0.001/0.001 -> argmax,
+        not "both"); the ratio rejects a clear winner with a marginal loser
+        (e.g. don=0.99, acc=0.02 -> donor only, ratio 0.02 < 0.1). Both must
+        hold for a position to light up both columns.
+        """
+        acc = self.probe_acceptor
+        don = self.probe_donor
+        mn = torch.minimum(acc, don)
+        mx = torch.maximum(acc, don)
+        both = (mn >= double_val_floor) & (mn >= double_val_ratio * mx)
+        acc_wins = acc >= don                       # ties -> acceptor
+        acc_col_mask = both | (~both & acc_wins)
+        don_col_mask = both | (~both & ~acc_wins)
+        return acc_col_mask, don_col_mask
+
+    def routed_tracks(self, double_val_floor=0.01, double_val_ratio=0.1):
+        """Route Pangolin P (and PSI, if available) into acceptor/donor tracks.
+
+        This is biPangolin's default user-facing output: a SpliceAI-style pair
+        of tracks where the *value* is always the Pangolin metric and the probe
+        only decides which column it lands in. The unrouted column is exactly
+        0.0, so in practice most intronic positions read e.g. acceptor=0,
+        donor=1.2e-5 (one hard zero, one near-zero).
+
+        Returns (prob_routed, psi_routed):
+            prob_routed : (2, n_tissues, L) — channel 0 acceptor, 1 donor
+            psi_routed  : same shape, or None if the runner had no PSI models
+
+        One identity, one router. A base has a single splice identity — it
+        either IS a donor site or IS an acceptor site; that is a property of the
+        sequence, not of which Pangolin head (P vs PSI) you read. So a SINGLE
+        routing decision is computed (from `_routing_masks`) and applied to BOTH
+        P and PSI. We deliberately do NOT route PSI by a separate PSI-side probe:
+        doing so could send the same base's P to the donor column and its PSI to
+        the acceptor column — a self-contradictory "donor for P, acceptor for
+        PSI" result — and would decouple the donor-P / donor-PSI tracks that
+        otherwise light up together. The router used here is the P-side probe,
+        which is also the one the none-class correction (`correction_k`) was
+        calibrated against. The lone exception is psi_only mode (the P-tuned
+        models are never run), where routing necessarily falls back to the
+        PSI-side probes; at borderline sites that can disagree slightly with a
+        --psi run, which is expected and unavoidable.
+        """
+        acc_col_mask, don_col_mask = self._routing_masks(
+            double_val_floor=double_val_floor, double_val_ratio=double_val_ratio)
+
+        def _route(values):
+            routed = torch.zeros(
+                2, values.shape[0], values.shape[1],
+                dtype=values.dtype, device=values.device)
+            routed[0, :, acc_col_mask] = values[:, acc_col_mask]
+            routed[1, :, don_col_mask] = values[:, don_col_mask]
+            return routed
+
+        prob_routed = _route(self.pangolin_prob)
+        psi_routed = _route(self.pangolin_psi) if self.pangolin_psi is not None else None
+        return prob_routed, psi_routed
 
 
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
+def _mps_is_healthy() -> bool:
+    """Probe whether the MPS backend handles the ops Pangolin relies on.
+
+    PyTorch's Metal (Apple Silicon) backend has historically mis-handled
+    high-dilation 1D convolutions (Pangolin uses atrous rates up to 25) and
+    boolean-mask indexing (used in four_track_per_tissue) — sometimes returning
+    NaNs or raising deep in the forward pass. We run a tiny representative
+    computation and confirm the result is finite before trusting MPS.
+    """
+    try:
+        dev = torch.device("mps")
+        x = torch.randn(1, 4, 256, device=dev)
+        conv = nn.Conv1d(4, 8, kernel_size=3, dilation=25, padding=25).to(dev)
+        y = conv(x)
+        mask = y[0, 0] > 0
+        _ = y[..., mask]  # boolean indexing along last dim
+        return bool(torch.isfinite(y).all().item())
+    except Exception:
+        return False
+
+
 def _resolve_device(device):
     if isinstance(device, torch.device):
-        return device
-    if device == "auto":
+        resolved = device
+    elif device == "auto":
         if torch.cuda.is_available():
-            return torch.device("cuda")
-        if torch.backends.mps.is_available():
-            return torch.device("mps")
-        return torch.device("cpu")
-    return torch.device(device)
+            resolved = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            resolved = torch.device("mps")
+        else:
+            resolved = torch.device("cpu")
+    else:
+        resolved = torch.device(device)
+
+    if resolved.type == "mps" and not _mps_is_healthy():
+        print(
+            "biPangolin: WARNING — the MPS (Apple Silicon) backend failed a "
+            "health check (high-dilation conv1d / boolean indexing errored or "
+            "produced NaN). Falling back to CPU.",
+            file=sys.stderr,
+        )
+        resolved = torch.device("cpu")
+    return resolved
 
 
 class BiPangolinRunner:
     def __init__(self, pangolin_model_dir=None, probe_dir=None, device="auto",
                  ensemble=True, probe_tag=None, correction_k=None,
                  correction_file=None, tissue="all_tissues",
-                 per_tissue_probes=False, use_psi_models=False):
+                 per_tissue_probes=False, use_psi_models=False,
+                 window_len=None, n_models_per_tissue=None):
         """Load Pangolin + probes for inference.
+
+        window_len: per-tile model input length (default 50000). Each tile
+            yields window_len - 2*PANGOLIN_CROP usable output positions; long
+            sequences are tiled with no overlap. Lower this if a machine OOMs
+            on the forward pass (e.g. CPU/MPS); raise it to cut the number of
+            forward passes on a GPU.
 
         use_psi_models: if True, additionally load Pangolin's PSI-tuned weight
             files (final.{fold}.{1,3,5,7}.3.v2) and read PSI from those.
@@ -270,6 +411,18 @@ class BiPangolinRunner:
             Costs ~2× Pangolin inference compute.
         """
         self.device = _resolve_device(device)
+        self.window_len = int(window_len) if window_len else DEFAULT_WINDOW_LEN
+        if self.window_len <= 2 * PANGOLIN_CROP:
+            raise ValueError(
+                f"window_len must exceed 2*PANGOLIN_CROP = {2 * PANGOLIN_CROP} "
+                f"(otherwise no usable output remains after the model's crop), "
+                f"got {self.window_len}")
+        self.usable_len = self.window_len - 2 * PANGOLIN_CROP
+        if n_models_per_tissue is not None and n_models_per_tissue not in (1, 2, 3):
+            raise ValueError(
+                f"n_models_per_tissue must be 1, 2, or 3 (the number of trained "
+                f"folds per tissue), got {n_models_per_tissue}")
+        self.n_models_per_tissue = n_models_per_tissue
         self.pangolin_model_dir = (
             Path(pangolin_model_dir) if pangolin_model_dir else resolve_pangolin_weights()
         )
@@ -279,6 +432,11 @@ class BiPangolinRunner:
         self.per_tissue_probes = per_tissue_probes
         self.use_psi_models = use_psi_models
         self._pair_specs = []
+        # Lazily-built caches of loaded (model, probe, handles, cfg, tissue_idx)
+        # tuples. Populated on first scoring call and reused for the runner's
+        # lifetime so we don't reload weights from disk on every sequence.
+        self._pair_cache = None
+        self._psi_cache = None
         # PSI-tuned model specs: (pangolin_path, probe_path_or_None, tissue_idx).
         # probe_path is populated only when the user has trained probes for the
         # PSI-tuned models (probes for model_nums 1,3,5,7); otherwise None and
@@ -307,6 +465,13 @@ class BiPangolinRunner:
 
         if not candidates:
             raise FileNotFoundError(f"No Pangolin P-tuned models found in {self.pangolin_model_dir}")
+        # Fast modes: keep only the first n folds per tissue (1, 2, or 3). Fewer
+        # folds => proportionally less inference, at some loss of ensemble
+        # robustness. Routing is unaffected (it still averages whatever folds
+        # remain before deciding).
+        if n_models_per_tissue is not None:
+            candidates = self._limit_per_tissue(candidates, n_models_per_tissue)
+            psi_candidates = self._limit_per_tissue(psi_candidates, n_models_per_tissue)
         if not ensemble:
             candidates = candidates[:1]
             psi_candidates = psi_candidates[:1]
@@ -365,6 +530,20 @@ class BiPangolinRunner:
         if self.correction_k is not None and self.correction_k != 1.0:
             print(f"biPangolin: correction k={self.correction_k:.1f}")
 
+    @staticmethod
+    def _limit_per_tissue(candidates, n):
+        """Keep at most n (path, tissue_idx) entries per tissue_idx, preserving
+        order (folds are encountered fold-1, fold-2, fold-3 in sorted name
+        order, so this keeps the lowest-numbered folds deterministically)."""
+        kept_per_tissue = {}
+        out = []
+        for path, tissue_idx in candidates:
+            c = kept_per_tissue.get(tissue_idx, 0)
+            if c < n:
+                out.append((path, tissue_idx))
+                kept_per_tissue[tissue_idx] = c + 1
+        return out
+
     def _resolve_correction_k(self, correction_k, correction_file):
         if correction_k is not None:
             return float(correction_k)
@@ -396,25 +575,29 @@ class BiPangolinRunner:
         corrected[NONE_CLASS] *= self.correction_k
         return corrected / corrected.sum(dim=0, keepdim=True).clamp_min(1e-12)
 
-    def _iter_pairs(self):
+    def _build_pair_cache(self):
+        cache = []
         for pangolin_path, probe_path, tissue_idx in self._pair_specs:
             pangolin_model = load_frozen_pangolin(pangolin_path, self.device)
             probe, cfg = load_probe(probe_path, self.device)
-
             layers = parse_probe_layers(cfg["probe_layer"])
             handles = attach_hooks(pangolin_model, layers)
+            cache.append((pangolin_model, probe, handles, cfg, tissue_idx))
+        return cache
 
-            try:
-                yield pangolin_model, probe, handles, cfg, tissue_idx
-            finally:
-                del pangolin_model, probe
-                if self.device.type == "cuda":
-                    torch.cuda.empty_cache()
+    def _iter_pairs(self):
+        # Models + probes are loaded from disk once and cached on the runner for
+        # its lifetime. Previously this reloaded every weight file (and moved it
+        # to the device) on *every* score_sequence() call — and the VCF path
+        # calls score_sequence twice per variant — which dominated runtime at
+        # scale. Hooks are attached exactly once when the cache is built;
+        # re-attaching per call against a persistent model would stack them.
+        if self._pair_cache is None:
+            self._pair_cache = self._build_pair_cache()
+        yield from self._pair_cache
 
-    def _iter_psi_models(self):
-        """Yield (pangolin_model, probe_or_None, handles_or_None, cfg_or_None, tissue_idx)
-        for the PSI-tuned Pangolin files. probe/handles/cfg are None when no
-        PSI-side probe was found. Only populated if `use_psi_models=True`."""
+    def _build_psi_cache(self):
+        cache = []
         for pangolin_path, probe_path, tissue_idx in self._psi_specs:
             pangolin_model = load_frozen_pangolin(pangolin_path, self.device)
             probe = None
@@ -424,14 +607,36 @@ class BiPangolinRunner:
                 probe, cfg = load_probe(probe_path, self.device)
                 layers = parse_probe_layers(cfg["probe_layer"])
                 handles = attach_hooks(pangolin_model, layers)
-            try:
-                yield pangolin_model, probe, handles, cfg, tissue_idx
-            finally:
-                del pangolin_model
-                if probe is not None:
-                    del probe
-                if self.device.type == "cuda":
-                    torch.cuda.empty_cache()
+            cache.append((pangolin_model, probe, handles, cfg, tissue_idx))
+        return cache
+
+    def _iter_psi_models(self):
+        """Yield (pangolin_model, probe_or_None, handles_or_None, cfg_or_None, tissue_idx)
+        for the PSI-tuned Pangolin files. probe/handles/cfg are None when no
+        PSI-side probe was found. Only populated if `use_psi_models=True`.
+        Like `_iter_pairs`, models are loaded once and cached for the runner's
+        lifetime."""
+        if self._psi_cache is None:
+            self._psi_cache = self._build_psi_cache()
+        yield from self._psi_cache
+
+    def _require_psi_routing(self):
+        """Validate that --psi-only style routing is possible: we need the
+        PSI-tuned models loaded AND PSI-side probes (probes trained against the
+        PSI-tuned model activations, i.e. probe files for model_nums 1,3,5,7)
+        for every PSI model, so the donor/acceptor routing can be computed
+        without running the P-tuned models at all."""
+        if not self.use_psi_models:
+            raise ValueError(
+                "psi_only requires use_psi_models=True (the PSI-tuned Pangolin "
+                "models supply both the PSI values and the routing probe).")
+        if not self._psi_has_probes:
+            raise ValueError(
+                "psi_only routing needs PSI-side probes — probe files matching "
+                "the PSI-tuned models (model_nums 1,3,5,7) — for every PSI "
+                "model in probe_dir, but they were not all found. Train/place "
+                "those probes, or use --psi (which routes with the P-side "
+                "probes) instead.")
 
     @torch.no_grad()
     def _forward_one(self, pangolin_model, probe, handles, cfg, seq_tensor):
@@ -458,16 +663,23 @@ class BiPangolinRunner:
         return out, probe_probs
 
     @torch.no_grad()
-    def score_sequence(self, seq):
+    def score_sequence(self, seq, psi_only=False):
         L_out = len(seq)
         if L_out == 0:
             raise ValueError("Sequence is empty")
-        if L_out > USABLE_LEN:
+        if L_out > self.usable_len:
             raise ValueError(
-                f"Sequence length {L_out} exceeds single-window max {USABLE_LEN}. "
+                f"Sequence length {L_out} exceeds single-window max {self.usable_len}. "
                 "Use score_long_sequence() for longer inputs.")
+        if psi_only:
+            self._require_psi_routing()
 
-        padded = "N" * PANGOLIN_CROP + seq + "N" * (WINDOW_LEN - PANGOLIN_CROP - L_out)
+        # Pad with exactly the receptive-field flank on each side: the model
+        # crops PANGOLIN_CROP off each end, so a (L_out + 2*PANGOLIN_CROP) input
+        # yields exactly L_out output positions. We deliberately do NOT pad out
+        # to a fixed window_len — that would waste compute (e.g. a 10kb variant
+        # window padded to 50kb is 5x the work for the same result).
+        padded = "N" * PANGOLIN_CROP + seq + "N" * PANGOLIN_CROP
         seq_t = one_hot_encode(padded).unsqueeze(0).to(self.device)
 
         prob_sums = {t: torch.zeros(L_out) for t in self.tissues_present}
@@ -487,24 +699,34 @@ class BiPangolinRunner:
             if compute_psi_probes else None
         )
 
-        # Pass 1: P-tuned models — collect P + probe outputs.
-        for pangolin_model, probe, handles, cfg, tissue_idx in self._iter_pairs():
-            pangolin_out, probe_probs = self._forward_one(
-                pangolin_model, probe, handles, cfg, seq_t)
-            prob_sums[tissue_idx] += pangolin_out[PROB_CHANNEL_PER_TISSUE[tissue_idx], :L_out].cpu()
-            p = probe_probs[:, :L_out].cpu()
-            probe_sum += p
-            if probe_sums_per_tissue is not None:
-                probe_sums_per_tissue[tissue_idx] += p
+        # Pass 1: P-tuned models — collect P + probe outputs. Skipped entirely
+        # in psi_only mode (no P value, routing comes from the PSI-side probes).
+        if not psi_only:
+            for pangolin_model, probe, handles, cfg, tissue_idx in self._iter_pairs():
+                pangolin_out, probe_probs = self._forward_one(
+                    pangolin_model, probe, handles, cfg, seq_t)
+                prob_sums[tissue_idx] += pangolin_out[PROB_CHANNEL_PER_TISSUE[tissue_idx], :L_out].cpu()
+                p = probe_probs[:, :L_out].cpu()
+                probe_sum += p
+                if probe_sums_per_tissue is not None:
+                    probe_sums_per_tissue[tissue_idx] += p
 
         # Pass 2 (optional): PSI-tuned models — collect PSI + (optional) PSI-side probe.
         if self.use_psi_models:
             for pangolin_model, probe, handles, cfg, tissue_idx in self._iter_psi_models():
-                if probe is not None and compute_psi_probes:
+                # Run the PSI-side probe when we need per-tissue PSI probes OR
+                # when psi_only routing requires the flat probe from PSI models.
+                need_probe = probe is not None and (compute_psi_probes or psi_only)
+                if need_probe:
                     pangolin_out, probe_probs = self._forward_one(
                         pangolin_model, probe, handles, cfg, seq_t)
                     p = probe_probs[:, :L_out].cpu()
-                    probe_sums_per_tissue_psi[tissue_idx] += p
+                    if compute_psi_probes:
+                        probe_sums_per_tissue_psi[tissue_idx] += p
+                    if psi_only:
+                        probe_sum += p
+                        if probe_sums_per_tissue is not None:
+                            probe_sums_per_tissue[tissue_idx] += p
                 else:
                     with torch.no_grad():
                         pangolin_out = pangolin_model(seq_t)[0]
@@ -516,42 +738,51 @@ class BiPangolinRunner:
             psi_sums,
             probe_sum,
             psi_counts=psi_counts,
-            metadata={"length": L_out, "tiled": False},
+            metadata={"length": L_out, "tiled": False, "psi_only": psi_only},
             probe_sums_per_tissue=probe_sums_per_tissue,
             probe_sums_per_tissue_psi=probe_sums_per_tissue_psi,
+            probe_from_psi=psi_only,
         )
 
     @torch.no_grad()
-    def score_long_sequence(self, seq, overlap=TILE_OVERLAP):
+    def score_long_sequence(self, seq, psi_only=False):
+        """Score a sequence longer than one window by gap-free, overlap-free tiling.
+
+        Each tile feeds window_len bases to the model and gets back usable_len
+        output positions, each with full ±PANGOLIN_CROP context (guaranteed by
+        the model's internal crop). Tiles abut exactly, so there's nothing to
+        blend — within a single model+probe pair every output position is
+        written exactly once (a clamped final tile may re-cover some positions;
+        we skip the already-covered prefix so each position is counted once).
+        Ensemble averaging across pairs is then handled by _assemble_result,
+        identically to the single-window path.
+        """
         L_out = len(seq)
         if L_out == 0:
             raise ValueError("Sequence is empty")
-        if L_out <= USABLE_LEN:
-            return self.score_sequence(seq)
-        if not (0 <= overlap < USABLE_LEN):
-            raise ValueError(f"overlap must be in [0, {USABLE_LEN}), got {overlap}")
+        if psi_only:
+            self._require_psi_routing()
+        if L_out <= self.usable_len:
+            return self.score_sequence(seq, psi_only=psi_only)
 
-        stride = USABLE_LEN - overlap
-        starts = list(range(0, max(1, L_out - USABLE_LEN + 1), stride))
-        if starts[-1] + USABLE_LEN < L_out:
-            starts.append(L_out - USABLE_LEN)
+        tile_out = self.usable_len
+        # Window output-start positions (in sequence coordinates). Stride ==
+        # tile_out so consecutive usable regions abut. A final clamped start
+        # ensures the tail is covered; it can only ever re-cover (never skip).
+        starts = list(range(0, max(1, L_out - tile_out + 1), tile_out))
+        if starts[-1] + tile_out < L_out:
+            starts.append(L_out - tile_out)
 
-        blend = self._triangular_blend(USABLE_LEN, overlap)
+        # Pad the whole sequence with one receptive-field flank each side. A
+        # window starting at sequence position `start` reads padded[start :
+        # start+window_len] and outputs sequence positions [start, start+tile_out).
         padded = "N" * PANGOLIN_CROP + seq + "N" * PANGOLIN_CROP
         padded_t = one_hot_encode(padded).to(self.device)
 
         prob_sums = {t: torch.zeros(L_out) for t in self.tissues_present}
-        psi_sums = (
-            {t: torch.zeros(L_out) for t in self.tissues_present}
-            if self.use_psi_models else None
-        )
+        psi_sums  = {t: torch.zeros(L_out) for t in self.tissues_present} if self.use_psi_models else None
+        psi_counts = {t: 0 for t in self.tissues_present} if self.use_psi_models else None
         probe_sum = torch.zeros(3, L_out)
-        weight_sum = torch.zeros(L_out)
-        tissue_weight_sum = {t: torch.zeros(L_out) for t in self.tissues_present}
-        psi_tissue_weight_sum = (
-            {t: torch.zeros(L_out) for t in self.tissues_present}
-            if self.use_psi_models else None
-        )
         probe_sums_per_tissue = (
             {t: torch.zeros(3, L_out) for t in self.tissues_present}
             if self.per_tissue_probes else None
@@ -563,79 +794,74 @@ class BiPangolinRunner:
             if compute_psi_probes else None
         )
 
-        # Pass 1: P-tuned models — P + probe.
-        for pangolin_model, probe, handles, cfg, tissue_idx in self._iter_pairs():
-            for start in starts:
-                window = padded_t[:, start:start + WINDOW_LEN].unsqueeze(0)
-                pangolin_out, probe_probs = self._forward_one(
-                    pangolin_model, probe, handles, cfg, window)
-
-                lo = start
-                hi = min(start + USABLE_LEN, L_out)
-                n = hi - lo
-                w = blend[:n]
-
-                prob_sums[tissue_idx][lo:hi] += (
-                    pangolin_out[PROB_CHANNEL_PER_TISSUE[tissue_idx], :n].cpu() * w)
-                p_w = probe_probs[:, :n].cpu() * w.unsqueeze(0)
-                probe_sum[:, lo:hi] += p_w
-                if probe_sums_per_tissue is not None:
-                    probe_sums_per_tissue[tissue_idx][:, lo:hi] += p_w
-                tissue_weight_sum[tissue_idx][lo:hi] += w
-                weight_sum[lo:hi] += w
+        # Pass 1: P-tuned models — P + probe. Accumulate each pair once per pos.
+        # Skipped in psi_only mode (routing comes from the PSI-side probes).
+        if not psi_only:
+            for pangolin_model, probe, handles, cfg, tissue_idx in self._iter_pairs():
+                covered_to = 0
+                for start in starts:
+                    window = padded_t[:, start:start + self.window_len].unsqueeze(0)
+                    pangolin_out, probe_probs = self._forward_one(
+                        pangolin_model, probe, handles, cfg, window)
+                    lo = max(start, covered_to)
+                    hi = min(start + tile_out, L_out)
+                    if hi <= lo:
+                        continue
+                    off = lo - start                      # offset into this tile's output
+                    prob_sums[tissue_idx][lo:hi] += (
+                        pangolin_out[PROB_CHANNEL_PER_TISSUE[tissue_idx], off:off + (hi - lo)].cpu())
+                    p = probe_probs[:, off:off + (hi - lo)].cpu()
+                    probe_sum[:, lo:hi] += p
+                    if probe_sums_per_tissue is not None:
+                        probe_sums_per_tissue[tissue_idx][:, lo:hi] += p
+                    covered_to = hi
 
         # Pass 2 (optional): PSI-tuned models — PSI + (optional) PSI-side probe.
         if self.use_psi_models:
             for pangolin_model, probe, handles, cfg, tissue_idx in self._iter_psi_models():
+                covered_to = 0
+                # Run the PSI-side probe when we need per-tissue PSI probes OR
+                # when psi_only routing requires the flat probe from PSI models.
+                need_probe = probe is not None and (compute_psi_probes or psi_only)
                 for start in starts:
-                    window = padded_t[:, start:start + WINDOW_LEN].unsqueeze(0)
-                    lo = start
-                    hi = min(start + USABLE_LEN, L_out)
-                    n = hi - lo
-                    w = blend[:n]
-                    if probe is not None and compute_psi_probes:
+                    window = padded_t[:, start:start + self.window_len].unsqueeze(0)
+                    lo = max(start, covered_to)
+                    hi = min(start + tile_out, L_out)
+                    if hi <= lo:
+                        continue
+                    off = lo - start
+                    if need_probe:
                         pangolin_out, probe_probs = self._forward_one(
                             pangolin_model, probe, handles, cfg, window)
-                        p_w = probe_probs[:, :n].cpu() * w.unsqueeze(0)
-                        probe_sums_per_tissue_psi[tissue_idx][:, lo:hi] += p_w
+                        p = probe_probs[:, off:off + (hi - lo)].cpu()
+                        if compute_psi_probes:
+                            probe_sums_per_tissue_psi[tissue_idx][:, lo:hi] += p
+                        if psi_only:
+                            probe_sum[:, lo:hi] += p
+                            if probe_sums_per_tissue is not None:
+                                probe_sums_per_tissue[tissue_idx][:, lo:hi] += p
                     else:
                         with torch.no_grad():
                             pangolin_out = pangolin_model(window)[0]
                     psi_sums[tissue_idx][lo:hi] += (
-                        pangolin_out[PSI_CHANNEL_PER_TISSUE[tissue_idx], :n].cpu() * w)
-                    psi_tissue_weight_sum[tissue_idx][lo:hi] += w
-
-        for tissue_idx in self.tissues_present:
-            weights = tissue_weight_sum[tissue_idx].clamp_min(1e-9)
-            prob_sums[tissue_idx] = prob_sums[tissue_idx] / weights
-            if probe_sums_per_tissue is not None:
-                probe_sums_per_tissue[tissue_idx] = (
-                    probe_sums_per_tissue[tissue_idx] / weights.unsqueeze(0))
-            if self.use_psi_models:
-                psi_weights = psi_tissue_weight_sum[tissue_idx].clamp_min(1e-9)
-                psi_sums[tissue_idx] = psi_sums[tissue_idx] / psi_weights
-                if probe_sums_per_tissue_psi is not None:
-                    probe_sums_per_tissue_psi[tissue_idx] = (
-                        probe_sums_per_tissue_psi[tissue_idx] / psi_weights.unsqueeze(0))
-        probe_sum = probe_sum / weight_sum.clamp_min(1e-9).unsqueeze(0)
+                        pangolin_out[PSI_CHANNEL_PER_TISSUE[tissue_idx], off:off + (hi - lo)].cpu())
+                    covered_to = hi
+                psi_counts[tissue_idx] += 1
 
         return self._assemble_result(
             prob_sums,
             psi_sums,
             probe_sum,
-            metadata={
-                "length": L_out,
-                "tiled": True,
-                "n_windows": len(starts),
-                "overlap": overlap,
-            },
-            skip_pair_normalisation=True,
+            psi_counts=psi_counts,
+            metadata={"length": L_out, "tiled": True, "n_windows": len(starts),
+                      "psi_only": psi_only},
             probe_sums_per_tissue=probe_sums_per_tissue,
             probe_sums_per_tissue_psi=probe_sums_per_tissue_psi,
+            probe_from_psi=psi_only,
         )
 
     @torch.no_grad()
-    def score_region(self, fasta_path, chrom, start, end, **kwargs):
+    def score_region(self, fasta_path, chrom, start, end, psi_only=False):
         try:
             import pyfastx
         except ImportError as e:
@@ -651,10 +877,7 @@ class BiPangolinRunner:
                              f"(length {len(fasta[chrom])})")
 
         seq = fasta[chrom][start:end].seq
-        result = score_sequence_or_long_sequence(self, seq) if not kwargs else (
-            self.score_sequence(seq) if len(seq) <= USABLE_LEN
-            else self.score_long_sequence(seq, **kwargs)
-        )
+        result = score_sequence_or_long_sequence(self, seq, psi_only=psi_only)
         result.metadata.update({
             "chrom": chrom,
             "start": start,
@@ -686,21 +909,15 @@ class BiPangolinRunner:
             progress=progress,
         )
 
-    @staticmethod
-    def _triangular_blend(usable_len, overlap):
-        if overlap == 0:
-            return torch.ones(usable_len)
-        ramp = torch.linspace(0, 1, overlap + 2)[1:-1]
-        weights = torch.ones(usable_len)
-        weights[:overlap] = ramp
-        weights[-overlap:] = ramp.flip(0)
-        return weights
-
     def _assemble_result(self, prob_sums, psi_sums, probe_sum, metadata=None,
                          skip_pair_normalisation=False,
                          probe_sums_per_tissue=None,
                          probe_sums_per_tissue_psi=None,
-                         psi_counts=None):
+                         psi_counts=None,
+                         probe_from_psi=False):
+        # probe_from_psi=True (psi_only mode): the flat routing probe and the
+        # per-tissue probe were accumulated from the PSI-tuned models, so they
+        # must be normalised by the PSI model counts, not the P-pair counts.
         if not skip_pair_normalisation:
             pair_tissues = [t for _, _, t in self._pair_specs]
             psi_tissues  = ([t for _, _, t in self._psi_specs]
@@ -709,8 +926,12 @@ class BiPangolinRunner:
                 n_tissue = pair_tissues.count(tissue_idx)
                 prob_sums[tissue_idx] = prob_sums[tissue_idx] / max(n_tissue, 1)
                 if probe_sums_per_tissue is not None:
+                    n_probe_tissue = (
+                        (psi_counts[tissue_idx] if psi_counts is not None
+                         else psi_tissues.count(tissue_idx))
+                        if probe_from_psi else n_tissue)
                     probe_sums_per_tissue[tissue_idx] = (
-                        probe_sums_per_tissue[tissue_idx] / max(n_tissue, 1))
+                        probe_sums_per_tissue[tissue_idx] / max(n_probe_tissue, 1))
                 if psi_sums is not None:
                     n_psi = psi_counts[tissue_idx] if psi_counts is not None else psi_tissues.count(tissue_idx)
                     psi_sums[tissue_idx] = psi_sums[tissue_idx] / max(n_psi, 1)
@@ -718,7 +939,8 @@ class BiPangolinRunner:
                     n_psi = psi_counts[tissue_idx] if psi_counts is not None else psi_tissues.count(tissue_idx)
                     probe_sums_per_tissue_psi[tissue_idx] = (
                         probe_sums_per_tissue_psi[tissue_idx] / max(n_psi, 1))
-            probe_sum = probe_sum / len(self._pair_specs)
+            n_probe = len(self._psi_specs) if probe_from_psi else len(self._pair_specs)
+            probe_sum = probe_sum / max(n_probe, 1)
 
         probe_sum = self._apply_correction(probe_sum)
 
@@ -783,10 +1005,10 @@ def selftest(pangolin_model_dir=None, probe_dir=None, device="auto",
     return result
 
 
-def score_sequence_or_long_sequence(runner, seq):
-    if len(seq) <= USABLE_LEN:
-        return runner.score_sequence(seq)
-    return runner.score_long_sequence(seq)
+def score_sequence_or_long_sequence(runner, seq, psi_only=False):
+    if len(seq) <= runner.usable_len:
+        return runner.score_sequence(seq, psi_only=psi_only)
+    return runner.score_long_sequence(seq, psi_only=psi_only)
 
 
 if __name__ == "__main__":

@@ -43,7 +43,18 @@ def _default_cache_dir() -> Path:
 
 def _verify_sha256(path: Path, expected: str) -> None:
     if expected.startswith("REPLACE_"):
-        return  # dev placeholder, skip
+        # Placeholder hash — integrity check is NOT being performed. This is a
+        # pre-publish TODO: compute the real sha256 of the release tarball and
+        # set PANGOLIN_WEIGHTS_SHA256. Until then we warn loudly rather than
+        # silently skip, since we're downloading a binary blob over the network.
+        print(
+            "biPangolin: WARNING — PANGOLIN_WEIGHTS_SHA256 is unset "
+            f"({expected!r}); downloaded weights at {path.name} are NOT being "
+            "integrity-checked. Set the real sha256 in _weights.py before "
+            "relying on this in production.",
+            file=sys.stderr,
+        )
+        return
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -57,7 +68,12 @@ def _verify_sha256(path: Path, expected: str) -> None:
 def _download(url: str, dest: Path) -> None:
     print(f"biPangolin: downloading {url}\n  -> {dest}", file=sys.stderr)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".part")
+    # Download to a process-unique temp name then atomically rename into place.
+    # On a shared filesystem (SLURM/Nextflow job arrays) several processes may
+    # download concurrently on a cold cache; with a per-PID temp they no longer
+    # write the same .part file, and os.replace guarantees `dest` is only ever
+    # observed as a complete file (last writer wins, all are byte-identical).
+    tmp = dest.with_suffix(dest.suffix + f".part.{os.getpid()}")
     try:
         urlretrieve(url, tmp)
     except Exception as e:
@@ -66,7 +82,7 @@ def _download(url: str, dest: Path) -> None:
             f"Failed to download Pangolin weights from {url}. "
             f"Check the URL is reachable and the release exists.\n  {e}"
         ) from e
-    tmp.rename(dest)
+    os.replace(tmp, dest)
 
 
 def _count_v2_files(directory: Path) -> int:
@@ -135,21 +151,64 @@ def resolve_pangolin_weights(cache_dir: Optional[Path] = None,
         _download(PANGOLIN_WEIGHTS_URL, archive)
     _verify_sha256(archive, PANGOLIN_WEIGHTS_SHA256)
 
-    # Extract.
-    print(f"biPangolin: extracting weights to {weights_dir}", file=sys.stderr)
-    weights_dir.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(archive) as tf:
-        tf.extractall(weights_dir, filter="data")
-    _flatten_singleton_subdir(weights_dir)
+    # Extract, then sanity-check the file count. If extraction yields too few
+    # files the archive itself is stale/incomplete (e.g. a cached copy of an
+    # older 12-file release). Re-download it ONCE and re-extract before giving
+    # up, so the cache self-heals instead of trapping the user in a permanent
+    # "re-extracting -> still too few -> error" loop.
+    def _extract() -> int:
+        # Extract to a process-unique temp dir, flatten it, then atomically
+        # publish to `weights_dir`. This keeps parallel job-array processes from
+        # clobbering each other mid-extraction (the old code rmtree'd + extracted
+        # into the shared dir, racing into "Directory not empty" / partial-file
+        # crashes). If a concurrent process publishes a complete dir first, we
+        # defer to it rather than overwrite.
+        tmp_dir = cache_dir / f"pangolin_models.{os.getpid()}.tmp"
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        print(f"biPangolin: extracting weights to {weights_dir}", file=sys.stderr)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with tarfile.open(archive) as tf:
+                tf.extractall(tmp_dir, filter="data")
+            _flatten_singleton_subdir(tmp_dir)
+            try:
+                # Atomic when weights_dir is absent or empty.
+                os.replace(tmp_dir, weights_dir)
+            except OSError:
+                # Another process already published. Use theirs if complete,
+                # otherwise replace a stale/partial dir.
+                if weights_dir.exists() and _count_v2_files(weights_dir) >= PANGOLIN_EXPECTED_FILES:
+                    pass
+                else:
+                    shutil.rmtree(weights_dir, ignore_errors=True)
+                    os.replace(tmp_dir, weights_dir)
+        finally:
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+        return _count_v2_files(weights_dir)
+
+    n = _extract()
+    if n < PANGOLIN_EXPECTED_FILES:
+        print(
+            f"biPangolin: cached archive {archive.name} yielded {n} .v2 files, "
+            f"expected {PANGOLIN_EXPECTED_FILES} — it is stale/incomplete. "
+            f"Re-downloading once.",
+            file=sys.stderr,
+        )
+        archive.unlink(missing_ok=True)
+        _download(PANGOLIN_WEIGHTS_URL, archive)
+        _verify_sha256(archive, PANGOLIN_WEIGHTS_SHA256)
+        n = _extract()
 
     # Final sanity check.
-    n = _count_v2_files(weights_dir)
     if n < PANGOLIN_EXPECTED_FILES:
         raise RuntimeError(
             f"Extracted {n} .v2 files from {archive.name} into {weights_dir}, "
-            f"expected at least {PANGOLIN_EXPECTED_FILES}. The tarball appears "
-            f"incomplete. Try `rm -rf {cache_dir}` and re-running, or update "
-            f"PANGOLIN_WEIGHTS_URL in {__file__} to point at a complete release."
+            f"expected at least {PANGOLIN_EXPECTED_FILES}. The freshly downloaded "
+            f"tarball is incomplete. Try `rm -rf {cache_dir}` and re-running, or "
+            f"update PANGOLIN_WEIGHTS_URL in {__file__} to point at a complete "
+            f"release (the configured URL is {PANGOLIN_WEIGHTS_URL})."
         )
     return weights_dir
 
