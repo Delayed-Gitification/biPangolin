@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bipangolin"
-version = "0.3.0"
+version = "0.4.0"
 description = "Per-base donor/acceptor splice site predictions from Pangolin representations"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -56,4 +56,10 @@ include = [
     "/README.md",
     "/LICENSE",
     "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests that require Pangolin model weights and run real inference",
 ]

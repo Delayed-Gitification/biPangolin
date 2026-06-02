@@ -22,7 +22,7 @@ from .runner import (
 )
 from ._variants import VariantScore
 
-__version__ = "0.1.0"
+__version__ = "0.4.0"
 __all__ = [
     "BiPangolinRunner", "BiPangolinResult", "VariantScore",
     "selftest", "CALIBRATION_SEQ",

@@ -244,8 +244,11 @@ def _iter_vcf(vcf_path: Path) -> Iterator[tuple]:
                 continue
             parts = line.split("\t")
             chrom, pos, vid, ref, alts, qual, filt, info = parts[:8]
+            first_alt = True
             for alt in alts.split(","):
-                yield header, chrom, int(pos), vid, ref, alt, qual, filt, info
+                yield_header = header if first_alt else []
+                yield yield_header, chrom, int(pos), vid, ref, alt, qual, filt, info
+                first_alt = False
             header = []   # only emit header on the first record
 
 

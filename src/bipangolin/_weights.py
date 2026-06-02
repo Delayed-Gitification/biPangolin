@@ -20,7 +20,7 @@ from urllib.request import urlretrieve
 # ---- USER-CONFIGURABLE CONSTANTS ----
 # These point at YOUR github release. Update before publishing.
 PANGOLIN_WEIGHTS_URL = (
-    "https://github.com/Delayed-Gitification/biPangolin/releases/download/v0.3.0/pangolin_models_v24.tar.gz"
+    "https://github.com/Delayed-Gitification/biPangolin/releases/download/v0.4.0/pangolin_models_v24.tar.gz"
 )
 PANGOLIN_WEIGHTS_SHA256 = "REPLACE_WITH_ACTUAL_SHA256_BEFORE_PUBLISHING"
 # Expected number of .v2 files in a complete extracted tarball: 3 folds × 8 tissue/head combos.
@@ -117,14 +117,14 @@ def resolve_pangolin_weights(cache_dir: Optional[Path] = None,
     out-of-date caches by file count and re-extracts (or re-downloads) when
     needed. Set the BIPANGOLIN_FORCE_REFRESH=1 env var, pass
     force_refresh=True, or `rm -rf` both `{cache}/pangolin_models/` and
-    `{cache}/pangolin_models_v2.tar.gz` to force a fresh download.
+    `{cache}/pangolin_models_v24.tar.gz` to force a fresh download.
     """
     if os.environ.get("BIPANGOLIN_FORCE_REFRESH"):
         force_refresh = True
 
     cache_dir = Path(cache_dir) if cache_dir else _default_cache_dir()
     weights_dir = cache_dir / "pangolin_models"
-    archive = cache_dir / "pangolin_models_v2.tar.gz"
+    archive = cache_dir / "pangolin_models_v24.tar.gz"
 
     # Cache hit: extracted dir exists and has the expected number of weight files.
     if not force_refresh and weights_dir.exists():

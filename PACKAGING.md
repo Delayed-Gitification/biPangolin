@@ -45,17 +45,18 @@ they ship with the wheel.
 
 ```bash
 cd /path/to/Pangolin/pangolin/models/
-tar czf pangolin_models_v2.tar.gz final.[1-3].[0246].3.v2
-ls -lh pangolin_models_v2.tar.gz   # should be ~50 MB
+tar czf pangolin_models_v24.tar.gz final.[1-3].[0246].3.v2 final.[1-3].[1357].3.v2
+ls -lh pangolin_models_v24.tar.gz
 ```
 
-Note we're only including the 12 even-indexed files (the ones the CLI
-actually uses). This halves the download.
+Include all 24 Pangolin v2 files: 12 P-tuned files plus 12 PSI-tuned files.
+The default P-only workflow uses the even-indexed files; `--psi` / `--psi-only`
+also need the odd-indexed PSI-tuned files.
 
 Get the SHA-256:
 
 ```bash
-sha256sum pangolin_models_v2.tar.gz
+sha256sum pangolin_models_v24.tar.gz
 ```
 
 Update `src/bipangolin/_weights.py`:
@@ -65,19 +66,19 @@ Update `src/bipangolin/_weights.py`:
 ## Step 4 — Create a GitHub Release
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 Then on github.com:
 1. Go to your repo → Releases → Draft a new release
-2. Tag: `v0.1.0`, title: "biPangolin v0.1.0"
-3. Upload `pangolin_models_v2.tar.gz` as a release asset
+2. Tag: `v0.4.0`, title: "biPangolin v0.4.0"
+3. Upload `pangolin_models_v24.tar.gz` as a release asset
 4. Publish release
 
 The download URL will be:
 ```
-https://github.com/USERNAME/bipangolin/releases/download/v0.1.0/pangolin_models_v2.tar.gz
+https://github.com/USERNAME/bipangolin/releases/download/v0.4.0/pangolin_models_v24.tar.gz
 ```
 
 This must match what's in `_weights.py`.
@@ -96,7 +97,7 @@ python -c "from bipangolin import selftest; selftest()"
 
 Expected output:
 ```
-biPangolin: 12 model+probe pairs (all_tissues) on cuda
+biPangolin: 12 model+probe pairs ready on cuda
   donor   peak: pos=  69 (expected 69)  P=0.998
   acceptor peak: pos= 163 (expected 163) P=0.997
 ```
@@ -106,10 +107,10 @@ biPangolin: 12 model+probe pairs (all_tissues) on cuda
 ```bash
 pip install build twine
 python -m build
-ls dist/   # should see bipangolin-0.1.0-py3-none-any.whl and .tar.gz
+ls dist/   # should see bipangolin-0.4.0-py3-none-any.whl and .tar.gz
 
 # Inspect the wheel contents to confirm probes are included
-unzip -l dist/bipangolin-0.1.0-py3-none-any.whl | grep probes
+unzip -l dist/bipangolin-0.4.0-py3-none-any.whl | grep probes
 # Should list all 24 .pt files
 
 # Check metadata
@@ -121,7 +122,7 @@ twine check dist/*
 ```bash
 python -m venv /tmp/test_install
 source /tmp/test_install/bin/activate
-pip install dist/bipangolin-0.1.0-py3-none-any.whl
+pip install dist/bipangolin-0.4.0-py3-none-any.whl
 bipangolin selftest
 deactivate
 ```
@@ -155,8 +156,8 @@ Done. Anyone can now `pip install bipangolin`.
 # 3. If you changed Pangolin weights, build new tarball + new GitHub release
 #    with new tag, update _weights.py URL + SHA
 # 4. Build and upload
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.4.0
+git push origin v0.4.0
 rm -rf dist/
 python -m build
 twine upload dist/*
