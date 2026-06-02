@@ -39,8 +39,13 @@ EXTRA_SCORE_FLAGS="--use-psi-models --per-tissue-probes"
 # -----------------------------------------------------------------------------
 
 # --- conda env ---------------------------------------------------------------
+# Conda's activation hooks (e.g. libblas_mkl_activate.sh) reference variables
+# like MKL_INTERFACE_LAYER that may be unset, which trips `set -u`. Relax
+# nounset just around activation, then restore the strict shell.
+set +u
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate bipangolin
+set -u
 # Conda's libstdc++ must come before the system one (TF / numpy need GLIBCXX_3.4.29).
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
