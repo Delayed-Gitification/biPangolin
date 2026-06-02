@@ -109,6 +109,69 @@ or just use the `bipangolin` CLI / `score_region`, which dispatch automatically.
 
 ---
 
+## Python: runner options
+
+You configure biPangolin once, when you build the `BiPangolinRunner`. The
+defaults are tuned for the common case — all four tissues, the full 3-fold
+ensemble, P (probability) tracks, automatic device selection — so
+`BiPangolinRunner()` with no arguments is a sensible starting point.
+
+```python
+from bipangolin import BiPangolinRunner
+
+# Defaults: tissue="all_tissues", n_models_per_tissue=3 (full ensemble),
+# use_psi_models=False (P only), device="auto" (GPU / Apple Silicon / CPU).
+runner = BiPangolinRunner()
+```
+
+The settings you are most likely to change:
+
+```python
+# A single tissue (faster, and the per-tissue accessors return one track set).
+runner = BiPangolinRunner(tissue="brain")     # heart / liver / brain / testis
+
+# Faster, lower-cost scoring: use fewer of the 3 folds per tissue.
+runner = BiPangolinRunner(n_models_per_tissue=1)   # or 2; default is 3
+
+# Also compute PSI (splice-site usage), not just P. Roughly doubles inference.
+runner = BiPangolinRunner(use_psi_models=True)
+result = runner.score_sequence(seq)
+result.brain_PSI            # now available; otherwise PSI accessors error
+
+# Force a specific device instead of auto-detection.
+runner = BiPangolinRunner(device="cpu")       # or "cuda", "mps"
+
+# Lower the per-tile input length if a machine runs out of memory.
+runner = BiPangolinRunner(window_len=20000)   # default 50000
+```
+
+Once built, a runner can score as many sequences as you like:
+
+```python
+runner = BiPangolinRunner(tissue="brain", use_psi_models=True)
+
+result = runner.score_sequence("ACGT" * 500)         # any length; auto-tiled
+region = runner.score_region("hg38.fa", "chr19", 13_200_000, 13_300_000)
+
+result.brain_P              # (2, L) routed P,  donor row 0, acceptor row 1
+result.brain_PSI            # (2, L) routed PSI
+```
+
+Routing is decided at read time, so you can re-route the same result with
+different sensitivity without re-scoring:
+
+```python
+result = runner.score_sequence(seq)
+
+# Defaults: floor 0.01, ratio 0.1 (when a position is assigned to both
+# donor and acceptor columns).
+prob_routed, psi_routed = result.routed_tracks()                  # (2, n_tissues, L)
+prob_routed, _          = result.routed_tracks(double_val_floor=0.05,
+                                                double_val_ratio=0.2)
+```
+
+---
+
 ## What you get: routed tracks
 
 biPangolin's primary output is a **routed** pair of tracks. At every position:
