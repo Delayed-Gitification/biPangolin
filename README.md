@@ -34,19 +34,16 @@ from bipangolin import BiPangolinRunner
 runner = BiPangolinRunner()                  # all tissues
 result = runner.score_sequence("ACGT" * 500)
 
-acceptor, donor = result.brain_P             # two (L,) tracks for brain
-avg_acc, avg_don = result.all_tissue_average_P   # mean over all tissues
+result.brain_P                # (2, L): donor on row 0, acceptor on row 1
+result.all_tissue_average_P   # (2, L): mean over all tissues
 ```
 
-Each `result.<tissue>_P` (and `_PSI`, if you ran PSI models) returns a
-`RoutedPair` you can unpack or access as `.acceptor` / `.donor`. Valid tissues
-are `heart`, `liver`, `brain`, `testis`, plus `all_tissue_average` (only when
-all four tissues were run). Asking for something that wasn't computed — PSI when
-you didn't load the PSI models, or a tissue you didn't score — raises a clear
-error telling you how to enable it.
-
-If you'd rather work with the full array, `result.routed_tracks()` returns the
-routed tracks with shape `(2, n_tissues, L)` (channel 0 acceptor, 1 donor).
+Each `result.<tissue>_P` (and `_PSI`, if you ran PSI models) returns a `(2, L)`
+tensor — donor row 0, acceptor row 1. Valid tissues are `heart`, `liver`,
+`brain`, `testis`, plus `all_tissue_average` (only when all four tissues were
+run). Asking for something that wasn't computed — PSI when you didn't load the
+PSI models, or a tissue you didn't score — raises a clear error telling you how
+to enable it.
 
 **Common modes** (mix and match on any scoring command):
 
@@ -104,7 +101,7 @@ from bipangolin import BiPangolinRunner
 runner = BiPangolinRunner(tissue="brain")   # auto-downloads weights; one tissue
 result = runner.score_sequence("ACGT" * 500)
 
-acceptor, donor = result.brain_P            # two (L,) tracks for brain
+result.brain_P                              # (2, L): donor row 0, acceptor row 1
 ```
 
 Long sequences are handled transparently — call `runner.score_long_sequence`,
@@ -233,14 +230,15 @@ Valid tissues: `heart`, `liver`, `brain`, `testis`.
 
 ## The result object
 
-The friendly accessors are the easiest entry point:
+The friendly accessors are the easiest entry point — each is a `(2, L)` tensor
+with donor on row 0 and acceptor on row 1:
 
 ```python
 result = runner.score_sequence(seq)
 
-acceptor, donor = result.brain_P            # RoutedPair of two (L,) tracks
-result.liver_PSI                            # RoutedPair (needs PSI models)
-result.all_tissue_average_P                 # mean over all tissues
+result.brain_P                # (2, L) for brain
+result.liver_PSI              # (2, L), PSI metric (needs PSI models)
+result.all_tissue_average_P   # (2, L), mean over all tissues
 ```
 
 The full set of attributes:

@@ -14,7 +14,6 @@ Usage (quick test in terminal):
     python runner.py /path/to/models /path/to/probes
 """
 from dataclasses import dataclass, field
-from typing import NamedTuple
 import json
 from pathlib import Path
 import re
@@ -186,15 +185,6 @@ def attach_hooks(model, probe_layers):
 # Result Container
 # ---------------------------------------------------------------------------
 
-class RoutedPair(NamedTuple):
-    """A routed Pangolin metric for one tissue (or the all-tissue average):
-    two (L,) tracks where the value is Pangolin's score and the column is the
-    probe-chosen splice identity. Access as `.acceptor` / `.donor`, or unpack
-    `acc, don = result.brain_P`."""
-    acceptor: torch.Tensor
-    donor: torch.Tensor
-
-
 @dataclass
 class BiPangolinResult:
     pangolin_prob: torch.Tensor
@@ -231,15 +221,16 @@ class BiPangolinResult:
     def __getattr__(self, name):
         """Friendly per-tissue accessors for the routed Pangolin tracks:
 
-            result.brain_P                  # RoutedPair(acceptor, donor) for brain
+            result.brain_P                  # (2, L) for brain: donor row 0, acceptor row 1
             result.brain_PSI                # same, PSI metric (needs PSI models)
             result.all_tissue_average_P     # mean over tissues (needs all tissues)
             result.all_tissue_average_PSI
 
-        Each returns a `RoutedPair` of two (L,) tracks. Asking for something
-        that was not computed raises a descriptive error telling you how to get
-        it. Only reached when normal attribute lookup fails, so the real
-        dataclass fields (pangolin_prob, probe_acceptor, ...) are untouched.
+        Each returns a (2, L) tensor: row 0 = donor, row 1 = acceptor. Asking
+        for something that was not computed raises a descriptive error telling
+        you how to get it. Only reached when normal attribute lookup fails, so
+        the real dataclass fields (pangolin_prob, probe_acceptor, ...) are
+        untouched.
         """
         # Never intercept dunder / private lookups (pickle, copy, etc.).
         if name.startswith("_"):
@@ -286,9 +277,10 @@ class BiPangolinResult:
                 "build the runner with that tissue (or tissue='all_tissues')."
             )
             ti = self.tissues.index(tissue)
-            pair = routed[:, ti, :]  # (2, L)
+            pair = routed[:, ti, :]  # (2, L), row 0 acceptor / row 1 donor
 
-        return RoutedPair(acceptor=pair[0], donor=pair[1])
+        # Return donor on top, acceptor on bottom.
+        return torch.stack([pair[1], pair[0]])
 
     @property
     def raw(self):
