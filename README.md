@@ -354,8 +354,7 @@ activations, and the per-position `none`/`acceptor`/`donor` predictions are
 averaged across folds per tissue.
 
 This is why `--n-models-per-tissue` / `n_models_per_tissue` (1, 2, or 3) trades
-robustness for speed: it sets how many of the three folds per output are
-loaded and ensembled, scaling that 24 down to as few as 8.
+robustness for speed - fewer models = less inference cost.
 
 ---
 
