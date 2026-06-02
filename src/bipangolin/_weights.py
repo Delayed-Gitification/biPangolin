@@ -22,7 +22,7 @@ from urllib.request import urlretrieve
 PANGOLIN_WEIGHTS_URL = (
     "https://github.com/Delayed-Gitification/biPangolin/releases/download/v0.4.0/pangolin_models_v24.tar.gz"
 )
-PANGOLIN_WEIGHTS_SHA256 = "REPLACE_WITH_ACTUAL_SHA256_BEFORE_PUBLISHING"
+PANGOLIN_WEIGHTS_SHA256 = "1c3c12e71e23887ec0b4290d20a045a2996d574322618380b07e7d6caa3a8805"
 # Expected number of .v2 files in a complete extracted tarball: 3 folds × 8 tissue/head combos.
 PANGOLIN_EXPECTED_FILES = 24
 # -------------------------------------
