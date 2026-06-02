@@ -165,9 +165,10 @@ def score_variant(runner, fasta, chrom: str, pos: int, ref: str, alt: str,
 
     Returns a VariantScore.
     """
-    # Use a wide enough half-window that a single forward pass is enough.
-    # USABLE_LEN = 10000, so half_window = 5000 - max(len(ref), len(alt)) // 2
-    # gives us room. We just use score_long_sequence to handle any size.
+    # A ±5000 half-window gives the variant its full receptive-field context.
+    # The resulting ~10kb sequence fits in a single forward pass (well under the
+    # default usable_len), and score_sequence now pads to len+2*crop so we don't
+    # waste compute. score_sequence_or_long_sequence picks the right path.
     from .runner import score_sequence_or_long_sequence
     ref_seq, alt_seq, var_offset = _build_ref_alt_sequences(
         fasta, chrom, pos, ref, alt, half_window=5000)
