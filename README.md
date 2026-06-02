@@ -58,6 +58,7 @@ argument:
 | The raw probe outputs as well | `--raw-probes` | *(always on the result: `result.probe_acceptor` / `result.probe_donor`)* |
 
 ---
+Note, when using PSI-only, acceptor vs donor routing may differ as PSI probes are used for routing (rather than P probes). Strong splice sites should be consistent in essentially all cases.
 
 ## Installation
 
