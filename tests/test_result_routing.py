@@ -62,14 +62,15 @@ def test_routing_applies_same_masks_to_psi():
     assert torch.equal(psi_routed[1, 0], torch.tensor([0.0, 0.2, 0.3, 0.0]))
 
 
-def test_friendly_accessor_returns_donor_then_acceptor():
+def test_friendly_accessor_returns_acceptor_then_donor():
     result = _result()
 
     brain = result.brain_P
 
     assert brain.shape == (2, 4)
-    assert torch.equal(brain[0], torch.tensor([0.0, 20.0, 30.0, 0.0]))
-    assert torch.equal(brain[1], torch.tensor([10.0, 0.0, 30.0, 40.0]))
+    # Row 0 acceptor, row 1 donor — same order as routed_tracks/CLI/VCF.
+    assert torch.equal(brain[0], torch.tensor([10.0, 0.0, 30.0, 40.0]))
+    assert torch.equal(brain[1], torch.tensor([0.0, 20.0, 30.0, 0.0]))
 
 
 def test_all_tissue_average_requires_all_tissues():

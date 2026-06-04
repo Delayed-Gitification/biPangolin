@@ -221,16 +221,18 @@ class BiPangolinResult:
     def __getattr__(self, name):
         """Friendly per-tissue accessors for the routed Pangolin tracks:
 
-            result.brain_P                  # (2, L) for brain: donor row 0, acceptor row 1
+            result.brain_P                  # (2, L) for brain: acceptor row 0, donor row 1
             result.brain_PSI                # same, PSI metric (needs PSI models)
             result.all_tissue_average_P     # mean over tissues (needs all tissues)
             result.all_tissue_average_PSI
 
-        Each returns a (2, L) tensor: row 0 = donor, row 1 = acceptor. Asking
-        for something that was not computed raises a descriptive error telling
-        you how to get it. Only reached when normal attribute lookup fails, so
-        the real dataclass fields (pangolin_prob, probe_acceptor, ...) are
-        untouched.
+        Each returns a (2, L) tensor: row 0 = acceptor, row 1 = donor. This is
+        the SAME channel order used everywhere else in biPangolin (routed_tracks,
+        the CLI bedGraphs, the VCF deltas, the probe class constants) — acceptor
+        always comes first. Asking for something that was not computed raises a
+        descriptive error telling you how to get it. Only reached when normal
+        attribute lookup fails, so the real dataclass fields (pangolin_prob,
+        probe_acceptor, ...) are untouched.
         """
         # Never intercept dunder / private lookups (pickle, copy, etc.).
         if name.startswith("_"):
@@ -279,8 +281,8 @@ class BiPangolinResult:
             ti = self.tissues.index(tissue)
             pair = routed[:, ti, :]  # (2, L), row 0 acceptor / row 1 donor
 
-        # Return donor on top, acceptor on bottom.
-        return torch.stack([pair[1], pair[0]])
+        # Same convention as routed_tracks/CLI/VCF: row 0 acceptor, row 1 donor.
+        return pair.contiguous()
 
     @property
     def raw(self):

@@ -34,12 +34,12 @@ from bipangolin import BiPangolinRunner
 runner = BiPangolinRunner()                  # all tissues
 result = runner.score_sequence("ACGT" * 500)
 
-result.brain_P                # (2, L): donor on row 0, acceptor on row 1
+result.brain_P                # (2, L): acceptor on row 0, donor on row 1
 result.all_tissue_average_P   # (2, L): mean over all tissues
 ```
 
 Each `result.<tissue>_P` (and `_PSI`, if you ran PSI models) returns a `(2, L)`
-tensor — donor row 0, acceptor row 1. Valid tissues are `heart`, `liver`,
+tensor — acceptor row 0, donor row 1 (the same order used everywhere in biPangolin). Valid tissues are `heart`, `liver`,
 `brain`, `testis`, plus `all_tissue_average` (only when all four tissues were
 run). Asking for something that wasn't computed — PSI when you didn't load the
 PSI models, or a tissue you didn't score — raises a clear error telling you how
@@ -129,7 +129,7 @@ from bipangolin import BiPangolinRunner
 runner = BiPangolinRunner(tissue="brain")   # auto-downloads weights; one tissue
 result = runner.score_sequence("ACGT" * 500)
 
-result.brain_P                              # (2, L): donor row 0, acceptor row 1
+result.brain_P                              # (2, L): acceptor row 0, donor row 1
 ```
 
 Long sequences are handled transparently — call `runner.score_long_sequence`,
@@ -189,7 +189,7 @@ runner = BiPangolinRunner(tissue="brain", use_psi_models=True)
 result = runner.score_sequence("ACGT" * 500)         # any length; auto-tiled
 region = runner.score_region("hg38.fa", "chr19", 13_200_000, 13_300_000)
 
-result.brain_P              # (2, L) routed P,  donor row 0, acceptor row 1
+result.brain_P              # (2, L) routed P,  acceptor row 0, donor row 1
 result.brain_PSI            # (2, L) routed PSI
 ```
 
@@ -362,7 +362,7 @@ Valid tissues: `heart`, `liver`, `brain`, `testis`.
 ## The result object
 
 The friendly accessors are the easiest entry point — each is a `(2, L)` tensor
-with donor on row 0 and acceptor on row 1:
+with acceptor on row 0 and donor on row 1 (consistent with routed_tracks, the CLI bedGraphs, and the VCF deltas):
 
 ```python
 result = runner.score_sequence(seq)
