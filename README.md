@@ -325,6 +325,13 @@ an averaged tissue block; if you want one tissue in the VCF, pass `--tissue`.
 Restricting the tissue is the way to keep the INFO field short for downstream
 parsers.
 
+#### VCF Annotation Limits
+
+`score-vcf` is designed as a lightweight, memory-efficient streaming parser with zero external dependencies (it does not require `pysam`). To achieve this, it has a few specific constraints:
+- **Automatic Gzip:** It natively reads `.vcf` or `.vcf.gz` inputs. The output will automatically be compressed with gzip if the output filename ends in `.gz`.
+- **Structural / Symbolic Variants:** It expects a clean VCF containing only standard sequence alleles. Symbolic alleles (like `<DEL>` or `<DUP>`) are skipped silently and annotated with null values (`.|.|.|.`).
+- **Performance:** For high-throughput annotation on massive cohorts, batching is not currently implemented. We recommend pre-filtering your VCF with `bcftools` to contain only variants of interest before scoring.
+
 ### bedGraph output layout
 
 `--out PREFIX` writes one acceptor and one donor file per tissue and metric:

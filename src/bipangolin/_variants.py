@@ -294,7 +294,9 @@ def score_vcf(runner, vcf_in: Union[str, Path], vcf_out: Union[str, Path],
     # uncompressed, so the previous fh.readlines() + per-line dict approach
     # would OOM. Each variant line is fully self-contained (we append our INFO
     # field immediately), and multi-allelic ALTs are split/rejoined inline.
-    out_fh = open(vcf_out, "w")
+    is_gz_out = str(vcf_out).endswith(".gz")
+    out_opener = (lambda p: __import__("gzip").open(p, "wt")) if is_gz_out else (lambda p: open(p, "w"))
+    out_fh = out_opener(vcf_out)
     written_header = False
 
     def _inject_header_if_needed():
@@ -328,7 +330,7 @@ def score_vcf(runner, vcf_in: Union[str, Path], vcf_out: Union[str, Path],
                 chrom, pos, vid, ref, alts, qual, filt, info = parts[:8]
                 line_annots = []
                 for alt in alts.split(","):
-                    if alt in (".", "*", ""):
+                    if alt in (".", "*", "") or (alt.startswith("<") and alt.endswith(">")):
                         line_annots.append(f"{alt}|.|.|.|.|.|.|.|.")
                         continue
                     try:
