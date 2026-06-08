@@ -8,7 +8,7 @@ from bipangolin.runner import BiPangolinResult
 
 def _result(**overrides):
     base = {
-        "pangolin_prob": torch.tensor([[10.0, 20.0, 30.0, 40.0]]),
+        "pangolin_prob": torch.tensor([[0.14, 0.23, 0.32, 0.41]]),
         "pangolin_psi": None,
         "probe_none": torch.tensor([0.8, 0.8, 0.8, 0.8]),
         "probe_acceptor": torch.tensor([0.90, 0.01, 0.40, 0.001]),
@@ -31,8 +31,8 @@ def test_routed_tracks_channel_order_and_both_column_rule():
     assert psi_routed is None
     assert prob_routed.shape == (2, 1, 4)
     # routed_tracks row 0 is acceptor, row 1 is donor.
-    assert torch.equal(prob_routed[0, 0], torch.tensor([10.0, 0.0, 30.0, 40.0]))
-    assert torch.equal(prob_routed[1, 0], torch.tensor([0.0, 20.0, 30.0, 0.0]))
+    assert torch.allclose(prob_routed[0, 0], torch.tensor([0.1, 0.0, 0.3, 0.4]))
+    assert torch.allclose(prob_routed[1, 0], torch.tensor([0.0, 0.2, 0.3, 0.0]))
 
 
 def test_routing_floor_prevents_near_zero_double_routing():
@@ -69,8 +69,8 @@ def test_friendly_accessor_returns_acceptor_then_donor():
 
     assert brain.shape == (2, 4)
     # Row 0 acceptor, row 1 donor — same order as routed_tracks/CLI/VCF.
-    assert torch.equal(brain[0], torch.tensor([10.0, 0.0, 30.0, 40.0]))
-    assert torch.equal(brain[1], torch.tensor([0.0, 20.0, 30.0, 0.0]))
+    assert torch.allclose(brain[0], torch.tensor([0.1, 0.0, 0.3, 0.4]))
+    assert torch.allclose(brain[1], torch.tensor([0.0, 0.2, 0.3, 0.0]))
 
 
 def test_all_tissue_average_requires_all_tissues():

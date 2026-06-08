@@ -363,7 +363,8 @@ class BiPangolinResult:
             routed[1, :, don_col_mask] = values[:, don_col_mask]
             return routed
 
-        prob_routed = _route(self.pangolin_prob)
+        shifted_prob = torch.clamp((self.pangolin_prob - 0.05) / 0.9, min=0.0, max=1.0)
+        prob_routed = _route(shifted_prob)
         psi_routed = _route(self.pangolin_psi) if self.pangolin_psi is not None else None
         return prob_routed, psi_routed
 
