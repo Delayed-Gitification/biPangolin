@@ -97,3 +97,15 @@ def test_raw_concatenates_available_tracks():
     assert torch.equal(raw[0], result.pangolin_prob[0])
     assert torch.equal(raw[1], result.pangolin_psi[0])
     assert torch.equal(raw[4], result.probe_donor)
+
+def test_output_unscaled_values():
+    result = _result(metadata={"output_unscaled_values": True})
+
+    prob_routed, psi_routed = result.routed_tracks(
+        double_val_floor=0.05,
+        double_val_ratio=0.2,
+    )
+    
+    # Values should remain unscaled (e.g. 0.14), and baseline should be 0.05
+    assert torch.allclose(prob_routed[0, 0], torch.tensor([0.14, 0.05, 0.32, 0.41]))
+    assert torch.allclose(prob_routed[1, 0], torch.tensor([0.05, 0.23, 0.32, 0.05]))

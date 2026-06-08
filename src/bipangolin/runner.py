@@ -355,17 +355,24 @@ class BiPangolinResult:
         acc_col_mask, don_col_mask = self._routing_masks(
             double_val_floor=double_val_floor, double_val_ratio=double_val_ratio)
 
-        def _route(values):
-            routed = torch.zeros(
-                2, values.shape[0], values.shape[1],
+        def _route(values, fill_value=0.0):
+            routed = torch.full(
+                (2, values.shape[0], values.shape[1]), fill_value,
                 dtype=values.dtype, device=values.device)
             routed[0, :, acc_col_mask] = values[:, acc_col_mask]
             routed[1, :, don_col_mask] = values[:, don_col_mask]
             return routed
 
-        shifted_prob = torch.clamp((self.pangolin_prob - 0.05) / 0.9, min=0.0, max=1.0)
-        prob_routed = _route(shifted_prob)
-        psi_routed = _route(self.pangolin_psi) if self.pangolin_psi is not None else None
+        output_unscaled = self.metadata.get("output_unscaled_values", False)
+        if output_unscaled:
+            prob_shifted = self.pangolin_prob
+            prob_fill = 0.05
+        else:
+            prob_shifted = torch.clamp((self.pangolin_prob - 0.05) / 0.9, min=0.0, max=1.0)
+            prob_fill = 0.0
+
+        prob_routed = _route(prob_shifted, fill_value=prob_fill)
+        psi_routed = _route(self.pangolin_psi, fill_value=0.0) if self.pangolin_psi is not None else None
         return prob_routed, psi_routed
 
 
@@ -423,7 +430,8 @@ class BiPangolinRunner:
                  ensemble=True, probe_tag=None, correction_k=None,
                  correction_file=None, tissue="all_tissues",
                  per_tissue_probes=False, use_psi_models=False,
-                 window_len=None, n_models_per_tissue=None):
+                 window_len=None, n_models_per_tissue=None,
+                 output_unscaled_values=False):
         """Load Pangolin + probes for inference.
 
         window_len: per-tile model input length (default 50000). Each tile
@@ -440,6 +448,7 @@ class BiPangolinRunner:
             Costs ~2× Pangolin inference compute.
         """
         self.device = _resolve_device(device)
+        self.output_unscaled_values = output_unscaled_values
         self.window_len = int(window_len) if window_len else DEFAULT_WINDOW_LEN
         if self.window_len <= 2 * PANGOLIN_CROP:
             raise ValueError(
@@ -983,6 +992,9 @@ class BiPangolinRunner:
             if psi_sums is not None else None
         )
 
+        meta = metadata or {}
+        meta["output_unscaled_values"] = getattr(self, "output_unscaled_values", False)
+
         return BiPangolinResult(
             pangolin_prob=torch.stack([prob_sums[t] for t in self.tissues_present]),
             pangolin_psi=pangolin_psi_t,
@@ -990,7 +1002,7 @@ class BiPangolinRunner:
             probe_acceptor=probe_sum[ACC_CLASS],
             probe_donor=probe_sum[DON_CLASS],
             tissues=self.tissue_names,
-            metadata=metadata or {},
+            metadata=meta,
             probe_per_tissue=probe_per_tissue,
             probe_per_tissue_psi=probe_per_tissue_psi,
         )

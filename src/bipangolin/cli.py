@@ -109,6 +109,8 @@ def _add_scoring_args(p) -> None:
     p.add_argument("--n-models-per-tissue", type=int, default=3, choices=(1, 2, 3),
                    help="Folds per tissue to ensemble: 3 (default, full), or "
                         "2 / 1 for faster, lower-robustness scoring")
+    p.add_argument("--output-unscaled-values", action="store_true",
+                   help="Output raw unscaled P values with 0.05 baseline instead of scaled [0,1] values")
     p.add_argument("--top", type=int, default=10, help="Top-K to print")
 
 
@@ -153,6 +155,8 @@ def main(argv=None):
     p_vcf.add_argument("--n-models-per-tissue", type=int, default=3, choices=(1, 2, 3),
                        help="Folds per tissue to ensemble: 3 (default, full), or "
                             "2 / 1 for faster, lower-robustness scoring")
+    p_vcf.add_argument("--output-unscaled-values", action="store_true",
+                       help="Output raw unscaled P values with 0.05 baseline instead of scaled [0,1] values")
     p_vcf.add_argument("--no-progress", action="store_true",
                        help="Disable progress bar")
 
@@ -167,7 +171,8 @@ def main(argv=None):
 
     if args.cmd == "score-vcf":
         runner = BiPangolinRunner(args.models, args.probes, tissue=args.tissue,
-                                  n_models_per_tissue=args.n_models_per_tissue)
+                                  n_models_per_tissue=args.n_models_per_tissue,
+                                  output_unscaled_values=args.output_unscaled_values)
         n = runner.score_vcf(
             args.vcf_in, args.vcf_out,
             fasta_path=args.fasta,
@@ -186,7 +191,8 @@ def _run_scoring(args):
     use_psi = bool(args.psi or args.psi_only)
     runner = BiPangolinRunner(args.models, args.probes, tissue=args.tissue,
                               use_psi_models=use_psi,
-                              n_models_per_tissue=args.n_models_per_tissue)
+                              n_models_per_tissue=args.n_models_per_tissue,
+                              output_unscaled_values=args.output_unscaled_values)
 
     if args.cmd == "score-seq":
         if Path(args.input).is_file():

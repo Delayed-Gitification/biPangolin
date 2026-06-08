@@ -214,9 +214,9 @@ biPangolin's primary output is a **routed** pair of tracks. At every position:
 
 - the **value** is Pangolin's metric (P(spliced) or PSI);
 - the **column** it lands in (acceptor or donor) is chosen by the probe;
-- the other column is `0`.
+- the other column is `0` (or `0.05` if outputting unscaled P values).
 
-So a clean donor site reads `acceptor=0, donor=0.97`.
+So a clean donor site reads `acceptor=0, donor=0.97` for P(spliced).
 
 ### Routing rule
 
@@ -233,14 +233,28 @@ PSI, so a position's donor/acceptor identity is consistent across metrics.
 
 ### Shifting and clamping (noise reduction)
 
-To clean up low-level background noise and near-zero predictions from the final routed tracks, the $P(\text{spliced})$ values are shifted and clamped before routing:
+During training, Pangolin's target splice probabilities are scaled between `0.05` and `0.95` (to prevent overconfidence and avoid penalizing extreme values too heavily). This means Pangolin's raw $P(\text{spliced})$ outputs naturally have a floor of around `0.05`.
+
+By default, biPangolin cleans up this low-level background noise by applying a linear shift and clamp before routing:
 
 $$P_{\text{shifted}} = \text{clamp}\left(\frac{P - 0.05}{0.9}, \text{min}=0.0, \text{max}=1.0\right)$$
 
-* **Rationale:** During training, Pangolin's target splice probabilities are scaled between `0.05` and `0.95` (to prevent overconfidence and avoid penalizing extreme values too heavily). As a result, a raw prediction of `0.05` represents a true probability of `0.0`, and a prediction of `0.95` represents `1.0`. The linear shift `(P - 0.05) / 0.9` maps this training range back to standard `[0.0, 1.0]` probabilities, while the clamp filters out background predictions below `0.05`.
-* **Applies only to routed $P$ tracks:** This transformation is applied to the values routed into the final $P(\text{spliced})$ tracks (e.g. when accessing `result.brain_P` or calling `result.routed_tracks()`).
-* **Unmodified original values:** The original, unshifted Pangolin predictions remain completely untouched and can always be accessed via `result.pangolin_prob`.
-* **No shift on PSI:** The PSI (splice usage) tracks (`result.brain_PSI`) are not shifted, because Pangolin's PSI targets were trained on a standard 0.0 to 1.0 scale (0 to 100%).
+* **Applies only to routed $P$ tracks:** This transformation is applied to the values routed into the final $P(\text{spliced})$ tracks.
+* **No shift on PSI:** The PSI (splice usage) tracks (`result.brain_PSI`) are not shifted, because Pangolin's PSI targets were trained on a standard `0.0` to `1.0` scale.
+
+#### Outputting unscaled values
+
+If you prefer to work with the raw, unmodified Pangolin P values, you can disable this scaling:
+
+```bash
+bipangolin score-seq seq.fa --output-unscaled-values
+```
+
+```python
+runner = BiPangolinRunner(output_unscaled_values=True)
+```
+
+When scaling is disabled, the **unrouted** column in the $P(\text{spliced})$ tracks is filled with a baseline of `0.05` (instead of `0.0`) to match the unscaled noise floor. The raw predictions remain entirely intact and unshifted.
 
 ### Raw probe values
 
