@@ -235,7 +235,7 @@ PSI, so a position's donor/acceptor identity is consistent across metrics.
 
 To clean up low-level background noise and near-zero predictions from the final routed tracks, the $P(\text{spliced})$ values are shifted and clamped before routing:
 
-$$\text{shifted\_P} = \text{clamp}\left(\frac{P - 0.05}{0.9}, \text{min}=0.0, \text{max}=1.0\right)$$
+$$P_{\text{shifted}} = \text{clamp}\left(\frac{P - 0.05}{0.9}, \text{min}=0.0, \text{max}=1.0\right)$$
 
 * **Rationale:** During training, Pangolin's target splice probabilities are scaled between `0.05` and `0.95` (to prevent overconfidence and avoid penalizing extreme values too heavily). As a result, a raw prediction of `0.05` represents a true probability of `0.0`, and a prediction of `0.95` represents `1.0`. The linear shift `(P - 0.05) / 0.9` maps this training range back to standard `[0.0, 1.0]` probabilities, while the clamp filters out background predictions below `0.05`.
 * **Applies only to routed $P$ tracks:** This transformation is applied to the values routed into the final $P(\text{spliced})$ tracks (e.g. when accessing `result.brain_P` or calling `result.routed_tracks()`).
