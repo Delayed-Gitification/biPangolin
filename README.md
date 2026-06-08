@@ -212,13 +212,15 @@ prob_routed, _          = result.routed_tracks(double_val_floor=0.05,
 
 biPangolin's primary output is a **routed** pair of tracks. At every position:
 
-- the **value** is always Pangolin's metric (P(spliced), and optionally PSI);
+- the **value** is Pangolin's metric (P(spliced) or PSI);
 - the **column** it lands in (acceptor or donor) is chosen by the probe;
 - the other column is `0`.
 
 So a clean donor site reads `acceptor=0, donor=0.97`.
 
-The routing rule, using the probe acceptor/donor probabilities at each position:
+### Routing rule
+
+The routing rule uses the probe acceptor/donor probabilities at each position to assign values:
 
 | Case | Result |
 |------|--------|
@@ -228,6 +230,17 @@ The routing rule, using the probe acceptor/donor probabilities at each position:
 Defaults are `floor = 0.01`, `ratio = 0.1`, tunable with `--double-val-floor` /
 `--double-val-ratio`. The same single routing decision is applied to both P and
 PSI, so a position's donor/acceptor identity is consistent across metrics.
+
+### Shifting and clamping (noise reduction)
+
+To clean up low-level background noise and near-zero predictions from the final routed tracks, the $P(\text{spliced})$ values are shifted and clamped before routing:
+
+$$\text{shifted\_P} = \text{clamp}\left(\frac{P - 0.05}{0.9}, \text{min}=0.0, \text{max}=1.0\right)$$
+
+* **Rationale:** During training, Pangolin's target splice probabilities are scaled between `0.05` and `0.95` (to prevent overconfidence and avoid penalizing extreme values too heavily). As a result, a raw prediction of `0.05` represents a true probability of `0.0`, and a prediction of `0.95` represents `1.0`. The linear shift `(P - 0.05) / 0.9` maps this training range back to standard `[0.0, 1.0]` probabilities, while the clamp filters out background predictions below `0.05`.
+* **Applies only to routed $P$ tracks:** This transformation is applied to the values routed into the final $P(\text{spliced})$ tracks (e.g. when accessing `result.brain_P` or calling `result.routed_tracks()`).
+* **Unmodified original values:** The original, unshifted Pangolin predictions remain completely untouched and can always be accessed via `result.pangolin_prob`.
+* **No shift on PSI:** The PSI (splice usage) tracks (`result.brain_PSI`) are not shifted, because Pangolin's PSI targets were trained on a standard 0.0 to 1.0 scale (0 to 100%).
 
 ### Raw probe values
 
