@@ -231,11 +231,11 @@ Defaults are `floor = 0.01`, `ratio = 0.1`, tunable with `--double-val-floor` /
 `--double-val-ratio`. The same single routing decision is applied to both P and
 PSI, so a position's donor/acceptor identity is consistent across metrics.
 
-### Shifting and clamping (noise reduction)
+### Shifting and clamping (scaling)
 
 During training, Pangolin's target splice probabilities are scaled between `0.05` and `0.95` (to prevent overconfidence and avoid penalizing extreme values too heavily). This means Pangolin's raw $P(\text{spliced})$ outputs naturally have a floor of around `0.05`.
 
-By default, biPangolin cleans up this low-level background noise by applying a linear shift and clamp before routing:
+By default, biPangolin scales these values to a standard 0-to-1 range by applying a linear shift and clamp before routing:
 
 $$P_{\text{shifted}} = \text{clamp}\left(\frac{P - 0.05}{0.9}, \text{min}=0.0, \text{max}=1.0\right)$$
 
@@ -254,7 +254,7 @@ bipangolin score-seq seq.fa --output-unscaled-values
 runner = BiPangolinRunner(output_unscaled_values=True)
 ```
 
-When scaling is disabled, the **unrouted** column in the $P(\text{spliced})$ tracks is filled with a baseline of `0.05` (instead of `0.0`) to match the unscaled noise floor. The raw predictions remain entirely intact and unshifted.
+When scaling is disabled, the **unrouted** column in the $P(\text{spliced})$ tracks is filled with a baseline of `0.05` (instead of `0.0`) to match the unscaled baseline. The raw predictions remain entirely intact and unshifted.
 
 ### Raw probe values
 
@@ -278,6 +278,9 @@ not about accuracy. The point is consistency: the headline numbers stay
 Pangolin's, and the probe is used only to decide donor vs. acceptor. That keeps
 results directly comparable to plain Pangolin and avoids introducing a second
 score that users have to reason about. Hence the probe values are off by default.
+
+> [!WARNING]
+> If you want to report the *exact* original Pangolin values to match a standalone Pangolin run, you must use `--output-unscaled-values` (CLI) or `output_unscaled_values=True` (Python). Otherwise, biPangolin's default scaling will be applied, which shifts and clamps the $P(\text{spliced})$ track values to the $[0, 1]$ range.
 
 ---
 
