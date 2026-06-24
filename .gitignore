@@ -8,3 +8,17 @@
 /tests/__pycache__
 /src/bipangolin/__pycache__
 /score_and_plot*.ipynb
+random_bs/
+
+# Build artifacts
+/dist/
+/build/
+/*.egg-info/
+/src/*.egg-info/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# macOS metadata
+.DS_Store

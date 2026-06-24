@@ -4,10 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bipangolin"
-version = "0.4.0"
+version = "0.5.0"
 description = "Per-base donor/acceptor splice site predictions from Pangolin representations"
 readme = "README.md"
 license = { file = "LICENSE" }
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 requires-python = ">=3.9"
 authors = [
     { name = "Oscar Wilkins", email = "oscar.wilkins@crick.ac.uk" },
@@ -16,7 +17,7 @@ keywords = ["bioinformatics", "splicing", "deep-learning", "splice-prediction"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.9",
@@ -46,15 +47,13 @@ Issues = "https://github.com/Delayed-Gitification/biPangolin/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/bipangolin"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"src/bipangolin/data/probes" = "bipangolin/data/probes"
-
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
     "/tests",
     "/README.md",
     "/LICENSE",
+    "/THIRD_PARTY_NOTICES.md",
     "/pyproject.toml",
 ]
 

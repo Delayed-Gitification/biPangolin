@@ -247,37 +247,41 @@ class BiPangolinResult:
                 f"{type(self).__name__!r} object has no attribute {name!r}")
 
         if metric == "P":
-            assert not self.metadata.get("psi_only"), (
-                f"`{name}` is unavailable: this result was produced in "
-                "psi-only mode, so the P-tuned models were never run. Re-run "
-                "with `--psi` (CLI) or use_psi_models=True instead of "
-                "psi_only=True to get P tracks alongside PSI."
-            )
+            if self.metadata.get("psi_only"):
+                raise AttributeError(
+                    f"`{name}` is unavailable: this result was produced in "
+                    "psi-only mode, so the P-tuned models were never run. Re-run "
+                    "with `--psi` (CLI) or use_psi_models=True instead of "
+                    "psi_only=True to get P tracks alongside PSI."
+                )
         else:  # PSI
-            assert self.pangolin_psi is not None, (
-                f"`{name}` is unavailable: PSI was not computed. Build the "
-                "runner with use_psi_models=True (Python) or pass `--psi` / "
-                "`--psi-only` (CLI), then re-score."
-            )
+            if self.pangolin_psi is None:
+                raise AttributeError(
+                    f"`{name}` is unavailable: PSI was not computed. Build the "
+                    "runner with use_psi_models=True (Python) or pass `--psi` / "
+                    "`--psi-only` (CLI), then re-score."
+                )
 
         prob_routed, psi_routed = self.routed_tracks()
         routed = prob_routed if metric == "P" else psi_routed  # (2, n_tissues, L)
 
         if tissue == "all_tissue_average":
-            assert len(self.tissues) == len(TISSUE_NAMES), (
-                f"`{name}` needs all {len(TISSUE_NAMES)} tissues "
-                f"{TISSUE_NAMES}, but this result only has {tuple(self.tissues)}. "
-                "Build the runner with tissue='all_tissues' (the default) to "
-                "average across every tissue."
-            )
+            if len(self.tissues) != len(TISSUE_NAMES):
+                raise AttributeError(
+                    f"`{name}` needs all {len(TISSUE_NAMES)} tissues "
+                    f"{TISSUE_NAMES}, but this result only has {tuple(self.tissues)}. "
+                    "Build the runner with tissue='all_tissues' (the default) to "
+                    "average across every tissue."
+                )
             pair = routed.mean(dim=1)  # (2, L)
         else:
-            assert tissue in self.tissues, (
-                f"Tissue {tissue!r} is not in this result. Available tissues: "
-                f"{tuple(self.tissues)}. (Use one of those, or "
-                "'all_tissue_average'.) If you wanted a tissue not listed, "
-                "build the runner with that tissue (or tissue='all_tissues')."
-            )
+            if tissue not in self.tissues:
+                raise AttributeError(
+                    f"Tissue {tissue!r} is not in this result. Available tissues: "
+                    f"{tuple(self.tissues)}. (Use one of those, or "
+                    "'all_tissue_average'.) If you wanted a tissue not listed, "
+                    "build the runner with that tissue (or tissue='all_tissues')."
+                )
             ti = self.tissues.index(tissue)
             pair = routed[:, ti, :]  # (2, L), row 0 acceptor / row 1 donor
 

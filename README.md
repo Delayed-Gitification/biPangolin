@@ -63,6 +63,12 @@ Note, when using PSI-only, acceptor vs donor routing may differ as PSI probes ar
 ## Installation
 
 ```bash
+pip install bipangolin
+```
+
+For development from a local checkout:
+
+```bash
 git clone https://github.com/Delayed-Gitification/biPangolin
 cd biPangolin
 pip install -e .
@@ -465,8 +471,10 @@ robustness for speed - fewer models = less inference cost.
 
 ## Citation & license
 
-biPangolin builds on Pangolin (Zeng & Li, 2022). The vendored Pangolin model
-code is included under the MIT License (© Tony Zeng, Yang I. Li); see `LICENSE`.
+biPangolin builds on Pangolin (Zeng & Li, 2022). biPangolin is distributed
+under the GPL-3.0 license; see `LICENSE`. The vendored Pangolin model code and
+the auto-downloaded Pangolin weights come from the upstream Pangolin project
+(`tkzeng/Pangolin`), which is also distributed under GPL-3.0.
 
 If you use biPangolin, please cite both biPangolin and the original Pangolin
 paper.

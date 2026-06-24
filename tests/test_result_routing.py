@@ -74,17 +74,17 @@ def test_friendly_accessor_returns_acceptor_then_donor():
 
 
 def test_all_tissue_average_requires_all_tissues():
-    with pytest.raises(AssertionError, match="needs all"):
+    with pytest.raises(AttributeError, match="needs all"):
         _ = _result().all_tissue_average_P
 
 
 def test_missing_psi_accessor_explains_how_to_enable_it():
-    with pytest.raises(AssertionError, match="PSI was not computed"):
+    with pytest.raises(AttributeError, match="PSI was not computed"):
         _ = _result().brain_PSI
 
 
 def test_p_accessor_is_unavailable_in_psi_only_results():
-    with pytest.raises(AssertionError, match="psi-only mode"):
+    with pytest.raises(AttributeError, match="psi-only mode"):
         _ = _result(metadata={"psi_only": True}).brain_P
 
 

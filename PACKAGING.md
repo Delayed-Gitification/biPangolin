@@ -20,7 +20,7 @@ head -20 model.py
 Add this header to the top of `model.py`:
 
 ```python
-# Vendored from https://github.com/tkzeng/Pangolin (MIT License)
+# Vendored from https://github.com/tkzeng/Pangolin (GPL-3.0 License)
 # Copyright (c) Tony Zeng, Yang I. Li, et al.
 ```
 
@@ -37,21 +37,26 @@ cp /path/to/bipangolin_probes/*.pt src/bipangolin/data/probes/
 ls src/bipangolin/data/probes/ | wc -l   # should be 24
 ```
 
-Total size should be ~1.3 MB — well within PyPI's per-file limit. The
-`pyproject.toml` already includes a `force-include` directive to ensure
-they ship with the wheel.
+Total size should be ~1.3 MB — well within PyPI's per-file limit. The probes
+live inside the `bipangolin` package tree, so Hatch includes them in the wheel
+with the package files.
 
 ## Step 3 — Build a tarball of the Pangolin weights
 
 ```bash
 cd /path/to/Pangolin/pangolin/models/
-tar czf pangolin_models_v24.tar.gz final.[1-3].[0246].3.v2 final.[1-3].[1357].3.v2
+cp /path/to/Pangolin/LICENSE PANGOLIN_LICENSE
+tar czf pangolin_models_v24.tar.gz final.[1-3].[0246].3.v2 final.[1-3].[1357].3.v2 PANGOLIN_LICENSE
 ls -lh pangolin_models_v24.tar.gz
 ```
 
 Include all 24 Pangolin v2 files: 12 P-tuned files plus 12 PSI-tuned files.
 The default P-only workflow uses the even-indexed files; `--psi` / `--psi-only`
 also need the odd-indexed PSI-tuned files.
+
+The `PANGOLIN_LICENSE` file keeps the standalone weight archive clear about its
+upstream GPL-3.0 provenance. Also mention Pangolin and GPL-3.0 in the GitHub
+release notes for the asset.
 
 Get the SHA-256:
 
@@ -66,13 +71,13 @@ Update `src/bipangolin/_weights.py`:
 ## Step 4 — Create a GitHub Release
 
 ```bash
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.5.0
+git push origin v0.5.0
 ```
 
 Then on github.com:
 1. Go to your repo → Releases → Draft a new release
-2. Tag: `v0.4.0`, title: "biPangolin v0.4.0"
+2. Tag: `v0.5.0`, title: "biPangolin v0.5.0"
 3. Upload `pangolin_models_v24.tar.gz` as a release asset
 4. Publish release
 
@@ -156,8 +161,8 @@ Done. Anyone can now `pip install bipangolin`.
 # 3. If you changed Pangolin weights, build new tarball + new GitHub release
 #    with new tag, update _weights.py URL + SHA
 # 4. Build and upload
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.5.0
+git push origin v0.5.0
 rm -rf dist/
 python -m build
 twine upload dist/*
@@ -177,7 +182,9 @@ storage isn't designed for binary blobs. GitHub Releases is the right place.
 Override with `BIPANGOLIN_CACHE` env var if needed.
 
 **Vendoring Pangolin's `model.py` is fine because:**
-1. It's MIT-licensed (verify by checking their LICENSE file).
+1. It's GPL-3.0-licensed (verify by checking their LICENSE file).
 2. It's small (~200 lines), unlikely to change frequently.
 3. It removes a fragile `git+https://...` dependency from your install.
-4. You include the original copyright notice as required by MIT.
+4. You include the original copyright notice and keep biPangolin's package
+   license metadata aligned with the repository's top-level GPL-3.0 `LICENSE`
+   file.

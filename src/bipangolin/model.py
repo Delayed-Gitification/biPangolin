@@ -1,4 +1,4 @@
-# Vendored from https://github.com/tkzeng/Pangolin (MIT License)
+# Vendored from https://github.com/tkzeng/Pangolin (GPL-3.0 License)
 # Copyright (c) Tony Zeng, Yang I. Li.
 
 import numpy as np
@@ -82,5 +82,4 @@ class Pangolin(nn.Module):
         out7 = F.softmax(self.conv_last7(skip), dim=1)
         out8 = torch.sigmoid(self.conv_last8(skip))
         return torch.cat([out1, out2, out3, out4, out5, out6, out7, out8], 1)
-
 

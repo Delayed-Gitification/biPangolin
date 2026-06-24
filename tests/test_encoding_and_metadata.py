@@ -14,7 +14,7 @@ def test_version_matches_package_metadata():
     pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
     version = re.search(r'^version = "([^"]+)"$', pyproject, flags=re.MULTILINE).group(1)
     assert bipangolin.__version__ == version
-    assert bipangolin.__version__ == "0.4.0"
+    assert bipangolin.__version__ == "0.5.0"
 
 
 def test_one_hot_encode_accepts_case_rna_and_n():

@@ -109,6 +109,28 @@ def _flatten_singleton_subdir(directory: Path) -> None:
         inner.rmdir()
 
 
+def _safe_extractall(tf: tarfile.TarFile, directory: Path) -> None:
+    """Extract a tarball safely across supported Python versions."""
+    try:
+        tf.extractall(directory, filter="data")
+        return
+    except TypeError:
+        # Python versions without tarfile extraction filters: reject path
+        # traversal and special/link members before falling back to extractall.
+        root = directory.resolve()
+        for member in tf.getmembers():
+            if not (member.isfile() or member.isdir()):
+                raise RuntimeError(
+                    f"Refusing to extract unsafe tar member {member.name!r}"
+                )
+            target = (directory / member.name).resolve()
+            if root != target and root not in target.parents:
+                raise RuntimeError(
+                    f"Refusing to extract unsafe tar member {member.name!r}"
+                )
+        tf.extractall(directory)
+
+
 def resolve_pangolin_weights(cache_dir: Optional[Path] = None,
                               force_refresh: bool = False) -> Path:
     """Return path to a directory containing Pangolin .v2 weight files.
@@ -170,7 +192,7 @@ def resolve_pangolin_weights(cache_dir: Optional[Path] = None,
         tmp_dir.mkdir(parents=True, exist_ok=True)
         try:
             with tarfile.open(archive) as tf:
-                tf.extractall(tmp_dir, filter="data")
+                _safe_extractall(tf, tmp_dir)
             _flatten_singleton_subdir(tmp_dir)
             try:
                 # Atomic when weights_dir is absent or empty.
