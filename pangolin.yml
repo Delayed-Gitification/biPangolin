@@ -138,4 +138,3 @@ dependencies:
       - pyparsing==3.3.2
       - setuptools==80.10.2
       - simplejson==3.20.2
-prefix: /Users/ogw/miniconda3/envs/pangolin
