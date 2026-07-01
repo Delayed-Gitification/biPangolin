@@ -1,0 +1,8 @@
+##fileformat=VCFv4.2
+##reference=hg38 chr12 slice from GAPDH.fasta
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr12	6536919	gapdh_acceptor_loss_1	G	T	.	PASS	.
+chr12	6537011	gapdh_donor_loss_1	G	C	.	PASS	.
+chr12	6537100	gapdh_acceptor_loss_2	G	T	.	PASS	.
+chr12	6537217	gapdh_donor_loss_2	G	C	.	PASS	.
+chr12	6535000	gapdh_low_impact_control	T	C	.	PASS	.

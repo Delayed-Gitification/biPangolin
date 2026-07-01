@@ -1,0 +1,6 @@
+ID	variant	intended_example
+gapdh_acceptor_loss_1	chr12:6536919 G>T	disrupts strong acceptor near chr12:6536920
+gapdh_donor_loss_1	chr12:6537011 G>C	disrupts strong donor near chr12:6537010
+gapdh_acceptor_loss_2	chr12:6537100 G>T	disrupts second strong acceptor near chr12:6537101
+gapdh_donor_loss_2	chr12:6537217 G>C	disrupts second strong donor near chr12:6537216
+gapdh_low_impact_control	chr12:6535000 T>C	nearby SNV with little predicted splice effect

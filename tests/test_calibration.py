@@ -49,3 +49,17 @@ def test_friendly_accessor_on_real_result(integration_runner):
     brain = result.brain_P
 
     assert brain.shape == (2, len(CALIBRATION_SEQ))
+
+
+def test_unscaled_routed_values_are_original_pangolin_values(integration_runner_unscaled):
+    """With scaling disabled, routing must preserve Pangolin's P values exactly."""
+    result = integration_runner_unscaled.score_sequence(CALIBRATION_SEQ)
+    prob_routed, psi_routed = result.routed_tracks()
+    acc_mask, don_mask = result._routing_masks()
+
+    assert psi_routed is None
+    assert result.metadata["output_unscaled_values"] is True
+    assert torch.allclose(prob_routed[0, :, acc_mask], result.pangolin_prob[:, acc_mask])
+    assert torch.allclose(prob_routed[1, :, don_mask], result.pangolin_prob[:, don_mask])
+    assert torch.all(prob_routed[0, :, ~acc_mask] == 0.05)
+    assert torch.all(prob_routed[1, :, ~don_mask] == 0.05)

@@ -62,6 +62,14 @@ Note, when using PSI-only, acceptor vs donor routing may differ as PSI probes ar
 
 ## Installation
 
+Recommended installation via Bioconda:
+
+```bash
+conda create -n bipangolin -c conda-forge -c bioconda bipangolin
+```
+
+Alternatively, install from PyPI:
+
 ```bash
 pip install bipangolin
 ```

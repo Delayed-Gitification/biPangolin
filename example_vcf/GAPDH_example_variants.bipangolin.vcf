@@ -1,0 +1,9 @@
+##fileformat=VCFv4.2
+##reference=hg38 chr12 slice from GAPDH.fasta
+##INFO=<ID=biPangolin,Number=.,Type=String,Description="biPangolin splice predictions: ALT|DS_AG|DS_AL|DS_DG|DS_DL|DP_AG|DP_AL|DP_DG|DP_DL[|TISSUE:DS_GAIN:DS_LOSS:DP_GAIN:DP_LOSS]">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr12	6536919	gapdh_acceptor_loss_1	G	T	.	PASS	biPangolin=T|0.047|0.990|0.011|0.000|6|1|91|-102|brain:0.424:0.886:6:1
+chr12	6537011	gapdh_donor_loss_1	G	C	.	PASS	biPangolin=C|0.001|0.495|0.002|0.966|102|-91|-50|-1|brain:0.053:0.873:-50:-1
+chr12	6537100	gapdh_acceptor_loss_2	G	T	.	PASS	biPangolin=T|0.981|0.978|0.001|0.000|13|1|-90|27|brain:0.850:0.888:13:1
+chr12	6537217	gapdh_donor_loss_2	G	C	.	PASS	biPangolin=C|0.001|0.093|0.010|0.978|-26|92|8|-1|brain:0.094:0.883:8:-1
+chr12	6535000	gapdh_low_impact_control	T	C	.	PASS	biPangolin=C|0.000|0.000|0.000|0.001|-52|27|26|-9|brain:0.001:0.000:-9:-2
